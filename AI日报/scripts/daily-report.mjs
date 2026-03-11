@@ -16,234 +16,413 @@ const requiredEnv = [
 
 function requireEnv(name) {
   const value = process.env[name];
-  if (!value || !value.trim()) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
+  if (!value || !value.trim()) throw new Error(`Missing required environment variable: ${name}`);
   return value.trim();
 }
 
-function normalizeApifyToken(raw) {
-  const value = raw.trim();
-  if (value.includes('token=')) {
-    try {
-      const asUrl = new URL(value);
-      const tokenFromQuery = asUrl.searchParams.get('token');
-      if (tokenFromQuery) return tokenFromQuery;
-    } catch {
-      const match = value.match(/token=([^&\s]+)/);
-      if (match?.[1]) return decodeURIComponent(match[1]);
-    }
-  }
-  return value;
+function optionalEnv(name) {
+  const value = process.env[name];
+  return value && value.trim() ? value.trim() : undefined;
 }
 
 function normalizeActorId(rawActorId) {
   const actorId = rawActorId.trim();
-  // Apify API path format prefers "username~actor-name".
   return actorId.includes('/') ? actorId.replace('/', '~') : actorId;
+}
+
+function normalizeApifyToken(raw) {
+  const value = raw.trim();
+  if (!value.includes('token=')) return value;
+  try {
+    const url = new URL(value);
+    return url.searchParams.get('token') || value;
+  } catch {
+    const match = value.match(/token=([^&\s]+)/);
+    return match?.[1] ? decodeURIComponent(match[1]) : value;
+  }
+}
+
+function parseBooleanEnv(value, fallback = false) {
+  if (typeof value !== 'string') return fallback;
+  const v = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on'].includes(v)) return true;
+  if (['0', 'false', 'no', 'n', 'off'].includes(v)) return false;
+  return fallback;
+}
+
+function maskSecret(value) {
+  if (!value) return '(empty)';
+  if (value.length <= 4) return '*'.repeat(value.length);
+  return `${value.slice(0, 2)}***${value.slice(-2)}`;
+}
+
+function formatBjtDateDaysAgo(daysAgo) {
+  const now = new Date();
+  const bjtNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+  const shifted = new Date(Date.UTC(bjtNow.getFullYear(), bjtNow.getMonth(), bjtNow.getDate() - daysAgo));
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-${String(shifted.getUTCDate()).padStart(2, '0')}`;
+}
+
+function parseApifyInputTemplate(raw) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return JSON.parse(raw.replace(/,\s*([}\]])/g, '$1'));
+  }
+}
+
+function normalizeHandle(value) {
+  return String(value || '').trim().replace(/^@/, '');
+}
+
+function parsePeopleRoster(raw) {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((row) => {
+          if (typeof row === 'string') return { name: row, handle: normalizeHandle(row) };
+          return {
+            name: String(row?.name || row?.fullname || row?.displayName || row?.handle || '').trim(),
+            handle: normalizeHandle(row?.handle || row?.username || row?.account || row?.twitter),
+          };
+        })
+        .filter((r) => r.handle);
+    }
+  } catch {}
+
+  return raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [name, handle] = line.split(',').map((v) => v.trim());
+      return { name: name || handle, handle: normalizeHandle(handle || name) };
+    })
+    .filter((r) => r.handle);
+}
+
+function getRosterFromEnvOrTemplate(templateInput) {
+  const envRoster = parsePeopleRoster(optionalEnv('APIFY_PEOPLE_JSON'));
+  if (envRoster.length > 0) return envRoster;
+
+  const searchTerms = Array.isArray(templateInput?.searchTerms) ? templateInput.searchTerms : [];
+  return searchTerms
+    .map((term) => String(term).match(/from:([^\s]+)/i)?.[1])
+    .filter(Boolean)
+    .map((handle) => ({ name: handle, handle: normalizeHandle(handle) }));
+}
+
+function buildApifyInput(templateInput, handles, since, until, maxItems = 1000) {
+  const base = templateInput && typeof templateInput === 'object' ? { ...templateInput } : {};
+  return {
+    ...base,
+    maxItems,
+    searchTerms: handles.map((h) => `from:${normalizeHandle(h)} since:${since} until:${until}`),
+  };
+}
+
+async function fetchApifyDatasetItems({ token, actorId, input }) {
+  const runPath = `https://api.apify.com/v2/acts/${encodeURIComponent(normalizeActorId(actorId))}/run-sync-get-dataset-items`;
+  const runSyncUrl = new URL(runPath);
+  runSyncUrl.searchParams.set('token', token);
+  runSyncUrl.searchParams.set('clean', 'true');
+
+  const response = await fetch(runSyncUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input || {}),
+  });
+
+  const body = await response.text();
+  if (!response.ok) throw new Error(`Apify run failed: ${response.status} ${body}`);
+
+  let items;
+  try {
+    items = JSON.parse(body);
+  } catch {
+    throw new Error(`Apify returned non-JSON response: ${body.slice(0, 500)}`);
+  }
+
+  if (!Array.isArray(items)) throw new Error('Apify returned non-array dataset items.');
+  return items;
+}
+
+function extractHandleFromItem(item) {
+  const keys = [
+    item?.author?.userName,
+    item?.author?.username,
+    item?.author?.screenName,
+    item?.userName,
+    item?.username,
+    item?.screenName,
+    item?.ownerUsername,
+    item?.handle,
+  ];
+  for (const k of keys) {
+    const h = normalizeHandle(k);
+    if (h) return h;
+  }
+  return '';
+}
+
+function extractTextFromItem(item) {
+  return [item?.text, item?.fullText, item?.full_text, item?.tweetText, item?.title]
+    .filter((v) => typeof v === 'string' && v.trim())
+    .join(' \n ')
+    .toLowerCase();
+}
+
+function isAiRelatedItem(item) {
+  const text = extractTextFromItem(item);
+  if (!text) return false;
+  const kws = [
+    'ai', 'artificial intelligence', 'llm', 'model', 'agent', 'openai', 'anthropic', 'gpt', 'gemini', 'claude',
+    'nvidia', 'robot', 'inference', 'training', '人工智能', '大模型', '智能体', '推理', '算力', '芯片', '机器学习',
+  ];
+  return kws.some((k) => text.includes(k));
+}
+
+function rankPeople(items, roster) {
+  const counts = new Map();
+  for (const item of items) {
+    const handle = extractHandleFromItem(item);
+    if (!handle) continue;
+    counts.set(handle, (counts.get(handle) || 0) + 1);
+  }
+
+  const names = new Map(roster.map((r) => [normalizeHandle(r.handle), r.name || r.handle]));
+  return Array.from(counts.entries())
+    .map(([handle, outputCount]) => ({ name: names.get(handle) || handle, handle, outputCount }))
+    .sort((a, b) => b.outputCount - a.outputCount);
+}
+
+function appendTop20Appendix(markdown, top20) {
+  const rows = top20.map((p, i) => `${i + 1}. ${p.name}（@${p.handle}）- ${p.outputCount}`).join('\n');
+  return `${markdown.trim()}\n\n## 附录：今日TOP20活跃人物\n\n${rows}\n`;
+}
+
+function normalizeMarkdownLayout(markdown) {
+  let text = String(markdown || '').replace(/\r\n/g, '\n').trim();
+  text = text.replace(/^\s*\*\s*$/gm, '');
+  text = text.replace(/([^\n])\s+(#{1,6}\s)/g, '$1\n\n$2');
+  text = text.replace(/([^\n])\s+(\d+\.\s+)/g, '$1\n\n$2');
+  text = text.replace(/\*\*事件：\*\*/g, '\n  ○ **事件：**');
+  text = text.replace(/\*\*关键进展：\*\*/g, '\n  ○ **关键进展：**');
+
+  const lines = text.split('\n');
+  let idx = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/^##\s+/.test(lines[i].trim())) idx = 0;
+    const m = lines[i].match(/^(\s*)\d+\.\s+(.*)$/);
+    if (m) {
+      idx += 1;
+      lines[i] = `${m[1]}${idx}. ${m[2]}`;
+    }
+  }
+  text = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+
+  if (!/##\s*五、AI大厂与投资机构资讯/.test(text)) {
+    text += '\n\n## 五、AI大厂与投资机构资讯\n\n1. **（占位）待补充大厂与投资机构动态**\n   ○ **事件：** 待补充。\n   ○ **关键进展：**\n     ■ **要点1：** 待补充。\n';
+  }
+
+  return `${text}\n`;
+}
+
+function escapeHtml(value) {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function formatInlineMarkdown(text) {
+  let out = escapeHtml(text);
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  return out;
+}
+
+function markdownToStyledHtml(markdown) {
+  const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
+  const html = [];
+  let inOl = false;
+  let inUl = false;
+
+  const closeLists = () => {
+    if (inOl) {
+      html.push('</ol>');
+      inOl = false;
+    }
+    if (inUl) {
+      html.push('</ul>');
+      inUl = false;
+    }
+  };
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) {
+      closeLists();
+      continue;
+    }
+    const h1 = line.match(/^#\s+(.+)/);
+    if (h1) {
+      closeLists();
+      html.push(`<h1 style="font-size:40px;line-height:1.25;margin:16px 0 20px;color:#111827;">${formatInlineMarkdown(h1[1])}</h1>`);
+      continue;
+    }
+    const h2 = line.match(/^##\s+(.+)/);
+    if (h2) {
+      closeLists();
+      html.push(`<h2 style="font-size:32px;line-height:1.3;margin:28px 0 14px;color:#111827;">${formatInlineMarkdown(h2[1])}</h2>`);
+      continue;
+    }
+    const ordered = line.match(/^\d+\.\s+(.+)/);
+    if (ordered) {
+      if (inUl) {
+        html.push('</ul>');
+        inUl = false;
+      }
+      if (!inOl) {
+        html.push('<ol style="margin:8px 0 16px 28px;padding:0;color:#111827;">');
+        inOl = true;
+      }
+      html.push(`<li style="margin:10px 0;font-size:22px;line-height:1.65;">${formatInlineMarkdown(ordered[1])}</li>`);
+      continue;
+    }
+    const bullet = line.match(/^[○■*-]\s+(.+)/);
+    if (bullet) {
+      if (inOl) {
+        html.push('</ol>');
+        inOl = false;
+      }
+      if (!inUl) {
+        html.push('<ul style="margin:8px 0 16px 30px;padding:0;color:#1f2937;">');
+        inUl = true;
+      }
+      html.push(`<li style="margin:6px 0;font-size:20px;line-height:1.75;">${formatInlineMarkdown(bullet[1])}</li>`);
+      continue;
+    }
+    closeLists();
+    html.push(`<p style="margin:10px 0;font-size:21px;line-height:1.8;color:#1f2937;">${formatInlineMarkdown(line)}</p>`);
+  }
+
+  closeLists();
+  return `<div style="font-family:'PingFang SC','Microsoft YaHei',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f8fafc;padding:24px;border-radius:12px;">${html.join('')}</div>`;
 }
 
 function getPromptTemplate() {
   return process.env.REPORT_PROMPT_TEMPLATE || `你是一个专业的AI行业分析师和情报Agent。
-你的任务是根据我提供的【真实抓取数据】，生成一份今日的“TwitterAI动态日报”。
+请根据提供的数据生成日报。
 
-追踪的名单包括：
-Twitter (X): Elon Musk, Sam Altman, Andrej Karpathy, Yann LeCun, Demis Hassabis, Jim Fan, Ashok Elluswamy, Andrew Ng, Fei-Fei Li, Ilya Sutskever, François Chollet, Geoffrey Hinton, Mustafa Suleyman, Greg Brockman, Noam Brown, Thomas Wolf, Dario Amodei, Aravind Srinivas, Arthur Mensch, Alexandr Wang
-
-以下是真实抓取并清洗后的最新动态数据（JSON格式）：
-{{APIFY_ITEMS_JSON}}
-
-请仔细阅读上述真实数据，并严格按照以下逻辑生成报告：
-
-【数据筛选规则】
-1. 仅仅关注这些人物关于“AI（人工智能）”以及“前沿科技”的发帖、转帖。
-2. 严格筛选掉无关的发帖（例如：日常闲聊、调侃、政治、生活琐事等）。
-
-【报告结构与排版要求】
-请彻底摒弃“流水账”式的按人头罗列的写法。必须以“事件/事实”为核心，突出重点。发帖人不应该作为事实的主语，而仅仅作为信息的Reference（来源参考）。
-
-请参考以下结构生成日报：
-
-# TwitterAI动态日报
-
-## 一、[大类名称，如：核心产品动态与市场反响]
-
-1. **[提炼的核心事件标题]**
-   * **事件：** [客观描述发生了什么事实，并以人物作为来源参考] [查看原帖](url)
-   * **关键进展：** [如果有详细内容，分点展开]
-
-## 二、[大类名称]
-...
-
-## 三、[大类名称]
-...
-
-## 四、其他值得关注的动向
-* **[简短标题]：** [一句话描述事实，发帖人作为Reference] [查看原帖](url)
-
-**总结：** [总结今日AI领域趋势。]
-
-【写作风格要求】
-- 突出重点，提炼核心价值。
-- 忠于事实，避免主观臆断。
-- 每条事实必须附原帖链接。
-- 语言专业、精炼。`;
+输出要求：
+1) 先输出TOP3热度事件（按相关输出量排序）
+2) 再输出7-12条中热度事件，按3-4个聚类大点组织
+3) 不需要按传统行业大类分类
+4) 每条必须带[查看原帖](url)
+5) 输出Markdown，结构清晰，分级列表明确
+`;
 }
 
-async function runApify() {
-  const token = normalizeApifyToken(requireEnv('APIFY_TOKEN'));
-  const actorId = normalizeActorId(requireEnv('APIFY_ACTOR_ID'));
-  const waitForFinish = Number(process.env.APIFY_WAIT_FOR_FINISH_SECONDS || 300);
-  const maxItems = Number(process.env.APIFY_DATASET_LIMIT || 200);
-
-  const input = process.env.APIFY_ACTOR_INPUT_JSON
-    ? JSON.parse(process.env.APIFY_ACTOR_INPUT_JSON)
-    : {};
-
-  const runUrl = new URL(`https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/runs`);
-  runUrl.searchParams.set('waitForFinish', String(waitForFinish));
-  runUrl.searchParams.set('token', token);
-
-  const runResp = await fetch(runUrl, {
+async function requestOpenAIReport({ apiKey, model, prompt }) {
+  const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(input),
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, input: prompt, temperature: Number(process.env.OPENAI_TEMPERATURE || 0.2) }),
   });
 
-  if (!runResp.ok) {
-    throw new Error(`Apify run failed: ${runResp.status} ${await runResp.text()}`);
-  }
+  if (!response.ok) throw new Error(`OpenAI request failed: ${response.status} ${await response.text()}`);
+  const json = await response.json();
+  const text = [
+    json?.output_text,
+    ...(json?.output || []).flatMap((item) => (item?.content || []).map((c) => c?.text).filter((v) => typeof v === 'string')),
+  ].filter(Boolean).join('\n').trim();
 
-  const runJson = await runResp.json();
-  const runData = runJson?.data;
-  if (!runData) {
-    throw new Error('Apify run response missing data.');
-  }
-  if (runData.status !== 'SUCCEEDED') {
-    throw new Error(`Apify run did not succeed. Status: ${runData.status}`);
-  }
-
-  const datasetId = runData.defaultDatasetId;
-  if (!datasetId) {
-    throw new Error('Apify run has no defaultDatasetId.');
-  }
-
-  const datasetUrl = new URL(`https://api.apify.com/v2/datasets/${datasetId}/items`);
-  datasetUrl.searchParams.set('clean', 'true');
-  datasetUrl.searchParams.set('limit', String(maxItems));
-  datasetUrl.searchParams.set('token', token);
-
-  const itemsResp = await fetch(datasetUrl);
-
-  if (!itemsResp.ok) {
-    throw new Error(`Apify dataset fetch failed: ${itemsResp.status} ${await itemsResp.text()}`);
-  }
-
-  const items = await itemsResp.json();
-  if (!Array.isArray(items)) {
-    throw new Error('Apify dataset items are not an array.');
-  }
-
-  return { items, runData, datasetId };
+  if (!text) throw new Error('OpenAI returned empty textual output.');
+  return text;
 }
 
-async function generateReport(items) {
+async function runApify(input) {
+  const token = normalizeApifyToken(requireEnv('APIFY_TOKEN'));
+  const actorId = requireEnv('APIFY_ACTOR_ID');
+  const items = await fetchApifyDatasetItems({ token, actorId, input });
+  return { items, runData: { id: normalizeActorId(actorId), status: 'SUCCEEDED' }, datasetId: 'run-sync-output' };
+}
+
+async function generateReport(items, top20) {
   if (!Array.isArray(items) || items.length === 0) {
-    const today = new Date().toISOString().slice(0, 10);
-    return `# TwitterAI动态日报\n\n日期：${today}\n\n## 今日概览\n\n今日抓取结果为 0 条有效动态，暂无可整理的 Twitter AI 前沿信息。\n\n## 建议排查\n\n1. 检查 Apify Actor 输入配置是否正确（账号列表、时间窗口、过滤条件）。\n2. 检查目标账号是否在抓取时间段内发布了公开内容。\n3. 检查 APIFY_DATASET_LIMIT 与清洗规则是否过于严格。\n`;
+    return `# TwitterAI动态日报\n\n今日无可用AI相关内容。\n`;
   }
 
   const apiKey = requireEnv('OPENAI_API_KEY');
   const model = requireEnv('OPENAI_MODEL');
+  console.log(`Using OPENAI_MODEL=${model}`);
 
-  const prompt = getPromptTemplate().replace('{{APIFY_ITEMS_JSON}}', JSON.stringify(items, null, 2));
-
-  const response = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      input: prompt,
-      temperature: Number(process.env.OPENAI_TEMPERATURE || 0.2),
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`OpenAI request failed: ${response.status} ${await response.text()}`);
-  }
-
-  const json = await response.json();
-  const text = [
-    json?.output_text,
-    ...(json?.output || []).flatMap((item) =>
-      (item?.content || [])
-        .map((contentItem) => contentItem?.text)
-        .filter((value) => typeof value === 'string'),
-    ),
-  ]
-    .filter((value) => typeof value === 'string')
-    .join('\n')
-    .trim();
-
-  if (!text) {
-    const outputLength = Array.isArray(json?.output) ? json.output.length : 0;
-    throw new Error(
-      `OpenAI returned empty textual output. status=${json?.status || 'unknown'}, output_length=${outputLength}`,
-    );
-  }
-
-  return text;
+  const prompt = `${getPromptTemplate()}\n\n数据如下：\n${JSON.stringify(items, null, 2)}`;
+  const markdown = await requestOpenAIReport({ apiKey, model, prompt });
+  return appendTop20Appendix(normalizeMarkdownLayout(markdown), top20);
 }
 
 async function sendEmail(reportMarkdown) {
-  const transporter = nodemailer.createTransport({
-    host: requireEnv('SMTP_HOST'),
-    port: Number(requireEnv('SMTP_PORT')),
-    secure: process.env.SMTP_SECURE === 'true',
-    auth: {
-      user: requireEnv('SMTP_USER'),
-      pass: requireEnv('SMTP_PASS'),
-    },
-  });
+  const host = requireEnv('SMTP_HOST');
+  const port = Number(requireEnv('SMTP_PORT'));
+  const user = requireEnv('SMTP_USER');
+  const pass = requireEnv('SMTP_PASS');
+  const secure = process.env.SMTP_SECURE ? parseBooleanEnv(process.env.SMTP_SECURE, false) : port === 465;
 
-  const now = new Date();
-  const subject = process.env.MAIL_SUBJECT || `Twitter AI 动态日报 ${now.toISOString().slice(0, 10)}`;
-  const to = requireEnv('MAIL_TO')
-    .split(',')
-    .map((v) => v.trim())
-    .filter(Boolean);
-
-  if (to.length === 0) {
-    throw new Error('MAIL_TO must contain at least one email recipient.');
+  const transporter = nodemailer.createTransport({ host, port, secure, auth: { user, pass } });
+  try {
+    await transporter.verify();
+  } catch (error) {
+    const errMsg = error?.message || String(error);
+    throw new Error(
+      `SMTP verify failed: ${errMsg}\nCurrent SMTP config => host=${host}, port=${port}, secure=${secure}, user=${maskSecret(user)}`,
+    );
   }
 
-  const html = `<pre style="white-space: pre-wrap; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; line-height:1.5">${reportMarkdown
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')}</pre>`;
+  const subject = process.env.MAIL_SUBJECT || `Twitter AI 动态日报 ${new Date().toISOString().slice(0, 10)}`;
+  const to = requireEnv('MAIL_TO').split(',').map((v) => v.trim()).filter(Boolean);
+  if (to.length === 0) throw new Error('MAIL_TO must contain at least one email recipient.');
 
   await transporter.sendMail({
     from: requireEnv('MAIL_FROM'),
     to,
     subject,
     text: reportMarkdown,
-    html,
+    html: markdownToStyledHtml(reportMarkdown),
   });
 }
 
 async function main() {
   requiredEnv.forEach(requireEnv);
 
-  const { items, runData, datasetId } = await runApify();
-  console.log(`Apify run ${runData.id} succeeded with ${items.length} items from dataset ${datasetId}.`);
+  const templateRaw = optionalEnv('APIFY_ACTOR_INPUT_JSON');
+  const templateInput = templateRaw ? parseApifyInputTemplate(templateRaw) : {};
+  const roster = getRosterFromEnvOrTemplate(templateInput);
+  if (roster.length === 0) {
+    throw new Error('No people roster found. Set APIFY_PEOPLE_JSON or provide searchTerms in APIFY_ACTOR_INPUT_JSON.');
+  }
 
-  const report = await generateReport(items);
+  const today = formatBjtDateDaysAgo(0);
+  const yesterday = formatBjtDateDaysAgo(1);
+  const weekAgo = formatBjtDateDaysAgo(7);
+
+  const weeklyInput = buildApifyInput(templateInput, roster.map((p) => p.handle), weekAgo, today, 1000);
+  const weekly = await runApify(weeklyInput);
+  console.log(`Weekly items: ${weekly.items.length}`);
+
   await fs.mkdir('artifacts', { recursive: true });
+  await fs.writeFile('artifacts/all-outputs.json', JSON.stringify(weekly.items, null, 2), 'utf8');
+
+  const ranking = rankPeople(weekly.items, roster);
+  const top20 = ranking.slice(0, 20);
+  await fs.writeFile('artifacts/top20-ranking.json', JSON.stringify(top20, null, 2), 'utf8');
+
+  const dailyInput = buildApifyInput(templateInput, top20.map((p) => p.handle), yesterday, today, 1000);
+  const daily = await runApify(dailyInput);
+  const aiRelatedDaily = daily.items.filter(isAiRelatedItem);
+  console.log(`Daily items: ${daily.items.length}, AI-related: ${aiRelatedDaily.length}`);
+
+  const report = await generateReport(aiRelatedDaily, top20);
   await fs.writeFile('artifacts/daily-report.md', report, 'utf8');
 
   await sendEmail(report);
