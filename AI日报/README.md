@@ -38,6 +38,8 @@ View your app in AI Studio: https://ai.studio/apps/641843a5-ce53-4d86-aa3d-2aab4
 - `APIFY_TOKEN` 可以填纯 token，也可以直接填带 `?token=...` 的完整 API URL，脚本会自动提取 token。
 - `APIFY_TASK_ID` 已不再使用，无需配置。
 - 仅当设置 `APIFY_ACTOR_INPUT_JSON` 时，脚本才会覆盖输入；未设置时沿用 Actor 默认输入。
+- 若 `APIFY_ACTOR_INPUT_JSON` 包含 `searchTerms`，脚本会按北京时间（Asia/Shanghai）自动改写每项中的 `since`/`until` 为“昨天→今天”的日期窗口后再调用 Apify。
+- 若模板 JSON 存在尾逗号，脚本会在不改变语义前提下自动修正为合法 JSON 再解析。
 - 当 OpenAI 报 `context_length_exceeded` 时，脚本会自动将输入条目减半重试（350 -> 175 -> 87 ...），直到成功。
 - 可选：`OPENAI_MIN_ITEMS`（默认 20）用于设置自动降采样的最小条目数下限。
 - 可选：`OPENAI_RETRY_DELAY_MS`（默认 1500）用于设置每次降采样重试前的等待毫秒数。
