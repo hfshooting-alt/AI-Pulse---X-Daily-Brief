@@ -109,8 +109,14 @@ function parsePositiveIntEnv(name, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function isContextLengthExceededErrorMessage(message) {
-  return /context_length_exceeded|context window|input exceeds the context window/i.test(message || '');
+function isReducibleOpenAIInputError(message) {
+  return /context_length_exceeded|context window|input exceeds the context window|rate_limit_exceeded|request too large|tokens per min|must be reduced/i.test(
+    message || '',
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function requestOpenAIReport({ apiKey, model, prompt }) {
@@ -239,6 +245,9 @@ async function generateReport(items) {
   const apiKey = requireEnv('OPENAI_API_KEY');
   const model = requireEnv('OPENAI_MODEL');
   const minItems = parsePositiveIntEnv('OPENAI_MIN_ITEMS', 20);
+  const retryDelayMs = parsePositiveIntEnv('OPENAI_RETRY_DELAY_MS', 1500);
+
+  console.log(`Using OPENAI_MODEL=${model}`);
 
   let itemLimit = items.length;
   while (itemLimit >= 1) {
@@ -256,18 +265,19 @@ async function generateReport(items) {
       return result;
     } catch (error) {
       const message = error?.message || String(error);
-      if (!isContextLengthExceededErrorMessage(message)) {
+      if (!isReducibleOpenAIInputError(message)) {
         throw error;
       }
 
       if (itemLimit <= minItems) {
         throw new Error(
-          `OpenAI context still exceeded at ${itemLimit} items. Set a larger-context OPENAI_MODEL or reduce APIFY_ACTOR_INPUT_JSON size/window. Last error: ${message}`,
+          `OpenAI request still too large at ${itemLimit} items. Set a larger-context OPENAI_MODEL or reduce APIFY_ACTOR_INPUT_JSON size/window. Last error: ${message}`,
         );
       }
 
       itemLimit = Math.max(minItems, Math.floor(itemLimit / 2));
-      console.warn(`OpenAI context exceeded, retrying with ${itemLimit} items...`);
+      console.warn(`OpenAI request too large, retrying with ${itemLimit} items after ${retryDelayMs}ms...`);
+      await sleep(retryDelayMs);
     }
   }
 

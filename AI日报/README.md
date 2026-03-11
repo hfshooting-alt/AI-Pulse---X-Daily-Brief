@@ -40,3 +40,5 @@ View your app in AI Studio: https://ai.studio/apps/641843a5-ce53-4d86-aa3d-2aab4
 - 仅当设置 `APIFY_ACTOR_INPUT_JSON` 时，脚本才会覆盖输入；未设置时沿用 Actor 默认输入。
 - 当 OpenAI 报 `context_length_exceeded` 时，脚本会自动将输入条目减半重试（350 -> 175 -> 87 ...），直到成功。
 - 可选：`OPENAI_MIN_ITEMS`（默认 20）用于设置自动降采样的最小条目数下限。
+- 可选：`OPENAI_RETRY_DELAY_MS`（默认 1500）用于设置每次降采样重试前的等待毫秒数。
+- 运行日志会打印 `Using OPENAI_MODEL=...`，可直接确认 Action 实际调用的模型名。
