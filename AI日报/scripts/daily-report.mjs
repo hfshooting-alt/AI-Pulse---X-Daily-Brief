@@ -187,27 +187,46 @@ async function requestOpenAIReport({ apiKey, model, prompt }) {
     throw new Error(`OpenAI request failed: ${response.status} ${body}`);
   }
 
-  const json = await response.json();
-  const text = [
-    json?.output_text,
-    ...(json?.output || []).flatMap((item) =>
-      (item?.content || [])
-        .map((contentItem) => contentItem?.text)
-        .filter((value) => typeof value === 'string'),
-    ),
-  ]
-    .filter((value) => typeof value === 'string')
-    .join('\n')
-    .trim();
+  const apiKey = requireEnv('OPENAI_API_KEY');
+  const model = requireEnv('OPENAI_MODEL');
+  const minItems = parsePositiveIntEnv('OPENAI_MIN_ITEMS', 20);
+  const retryDelayMs = parsePositiveIntEnv('OPENAI_RETRY_DELAY_MS', 1500);
 
-  if (!text) {
-    const outputLength = Array.isArray(json?.output) ? json.output.length : 0;
-    throw new Error(
-      `OpenAI returned empty textual output. status=${json?.status || 'unknown'}, output_length=${outputLength}`,
-    );
+  console.log(`Using OPENAI_MODEL=${model}`);
+
+  let itemLimit = items.length;
+  while (itemLimit >= 1) {
+    try {
+      const limitedItems = items.slice(0, itemLimit);
+      const prompt = getPromptTemplate().replace('{{APIFY_ITEMS_JSON}}', JSON.stringify(limitedItems, null, 2));
+      const result = await requestOpenAIReport({ apiKey, model, prompt });
+
+      if (itemLimit < items.length) {
+        console.warn(
+          `OpenAI context guard applied: used ${itemLimit}/${items.length} items to stay within model context window.`,
+        );
+      }
+
+      return normalizeMarkdownLayout(result);
+    } catch (error) {
+      const message = error?.message || String(error);
+      if (!isReducibleOpenAIInputError(message)) {
+        throw error;
+      }
+
+      if (itemLimit <= minItems) {
+        throw new Error(
+          `OpenAI request still too large at ${itemLimit} items. Set a larger-context OPENAI_MODEL or reduce APIFY_ACTOR_INPUT_JSON size/window. Last error: ${message}`,
+        );
+      }
+
+      itemLimit = Math.max(minItems, Math.floor(itemLimit / 2));
+      console.warn(`OpenAI request too large, retrying with ${itemLimit} items after ${retryDelayMs}ms...`);
+      await sleep(retryDelayMs);
+    }
   }
 
-  return text;
+  throw new Error('Failed to generate report due to repeated OpenAI context limit errors.');
 }
 
 
