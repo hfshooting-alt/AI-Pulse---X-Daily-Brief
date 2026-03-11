@@ -158,16 +158,6 @@ function parsePositiveIntEnv(name, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function isReducibleOpenAIInputError(message) {
-  return /context_length_exceeded|context window|input exceeds the context window|rate_limit_exceeded|request too large|tokens per min|must be reduced/i.test(
-    message || '',
-  );
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function requestOpenAIReport({ apiKey, model: selectedModel, prompt }) {
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
@@ -187,39 +177,29 @@ async function requestOpenAIReport({ apiKey, model: selectedModel, prompt }) {
     throw new Error(`OpenAI request failed: ${response.status} ${body}`);
   }
 
-  let itemLimit = items.length;
-  while (itemLimit >= 1) {
-    try {
-      const limitedItems = items.slice(0, itemLimit);
-      const prompt = getPromptTemplate().replace('{{APIFY_ITEMS_JSON}}', JSON.stringify(limitedItems, null, 2));
-      const result = await requestOpenAIReport({ apiKey, model, prompt });
+  const json = await response.json();
+  const text = [
+    json?.output_text,
+    ...(json?.output || []).flatMap((item) =>
+      (item?.content || [])
+        .map((contentItem) => contentItem?.text)
+        .filter((value) => typeof value === 'string'),
+    ),
+  ]
+    .filter((value) => typeof value === 'string')
+    .join('\n')
+    .trim();
 
-      if (itemLimit < items.length) {
-        console.warn(
-          `OpenAI context guard applied: used ${itemLimit}/${items.length} items to stay within model context window.`,
-        );
-      }
-
-      return normalizeMarkdownLayout(result);
-    } catch (error) {
-      const message = error?.message || String(error);
-      if (!isReducibleOpenAIInputError(message)) {
-        throw error;
-      }
-
-      if (itemLimit <= minItems) {
-        throw new Error(
-          `OpenAI request still too large at ${itemLimit} items. Set a larger-context OPENAI_MODEL or reduce APIFY_ACTOR_INPUT_JSON size/window. Last error: ${message}`,
-        );
-      }
-
-      itemLimit = Math.max(minItems, Math.floor(itemLimit / 2));
-      console.warn(`OpenAI request too large, retrying with ${itemLimit} items after ${retryDelayMs}ms...`);
-      await sleep(retryDelayMs);
-    }
+  if (!text) {
+    const outputLength = Array.isArray(json?.output) ? json.output.length : 0;
+    throw new Error(
+      `SMTP verify failed: ${errMsg}\n` +
+        `Current SMTP config => host=${host}, port=${port}, secure=${secure}, user=${maskSecret(user)}\n` +
+        `If your provider is 163/QQ/Gmail, use an SMTP authorization code (app password), not the mailbox login password.`,
+    );
   }
 
-  throw new Error('Failed to generate report due to repeated OpenAI context limit errors.');
+  return text;
 }
 
 
@@ -338,44 +318,18 @@ async function generateReport(items) {
 
   const apiKey = requireEnv('OPENAI_API_KEY');
   const openaiModel = requireEnv('OPENAI_MODEL');
-  const minItems = parsePositiveIntEnv('OPENAI_MIN_ITEMS', 20);
-  const retryDelayMs = parsePositiveIntEnv('OPENAI_RETRY_DELAY_MS', 1500);
+  const inputItemsLimit = parsePositiveIntEnv('OPENAI_INPUT_ITEMS', 80);
 
   console.log(`Using OPENAI_MODEL=${openaiModel}`);
 
-  let itemLimit = items.length;
-  while (itemLimit >= 1) {
-    try {
-      const limitedItems = items.slice(0, itemLimit);
-      const prompt = getPromptTemplate().replace('{{APIFY_ITEMS_JSON}}', JSON.stringify(limitedItems, null, 2));
-      const result = await requestOpenAIReport({ apiKey, model: openaiModel, prompt });
-
-      if (itemLimit < items.length) {
-        console.warn(
-          `OpenAI context guard applied: used ${itemLimit}/${items.length} items to stay within model context window.`,
-        );
-      }
-
-      return normalizeMarkdownLayout(result);
-    } catch (error) {
-      const message = error?.message || String(error);
-      if (!isReducibleOpenAIInputError(message)) {
-        throw error;
-      }
-
-      if (itemLimit <= minItems) {
-        throw new Error(
-          `OpenAI request still too large at ${itemLimit} items. Set a larger-context OPENAI_MODEL or reduce APIFY_ACTOR_INPUT_JSON size/window. Last error: ${message}`,
-        );
-      }
-
-      itemLimit = Math.max(minItems, Math.floor(itemLimit / 2));
-      console.warn(`OpenAI request too large, retrying with ${itemLimit} items after ${retryDelayMs}ms...`);
-      await sleep(retryDelayMs);
-    }
+  const selectedItems = items.slice(0, Math.min(items.length, inputItemsLimit));
+  if (selectedItems.length < items.length) {
+    console.log(`OpenAI input items limited to ${selectedItems.length}/${items.length} via OPENAI_INPUT_ITEMS.`);
   }
 
-  throw new Error('Failed to generate report due to repeated OpenAI context limit errors.');
+  const prompt = getPromptTemplate().replace('{{APIFY_ITEMS_JSON}}', JSON.stringify(selectedItems, null, 2));
+  const result = await requestOpenAIReport({ apiKey, model: openaiModel, prompt });
+  return normalizeMarkdownLayout(result);
 }
 
 async function sendEmail(reportMarkdown) {
