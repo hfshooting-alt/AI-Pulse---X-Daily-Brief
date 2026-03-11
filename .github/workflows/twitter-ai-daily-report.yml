@@ -29,10 +29,9 @@ jobs:
         run: npm run run:daily-report
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          APIFY_TASK_ID: ${{ secrets.APIFY_TASK_ID }}
           APIFY_ACTOR_ID: ${{ secrets.APIFY_ACTOR_ID }}
           APIFY_ACTOR_INPUT_JSON: ${{ secrets.APIFY_ACTOR_INPUT_JSON }}
-          APIFY_WAIT_FOR_FINISH_SECONDS: ${{ secrets.APIFY_WAIT_FOR_FINISH_SECONDS }}
-          APIFY_DATASET_LIMIT: ${{ secrets.APIFY_DATASET_LIMIT }}
 
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}

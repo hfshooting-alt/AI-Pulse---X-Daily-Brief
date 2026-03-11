@@ -3,7 +3,6 @@ import nodemailer from 'nodemailer';
 
 const requiredEnv = [
   'APIFY_TOKEN',
-  'APIFY_ACTOR_ID',
   'OPENAI_API_KEY',
   'OPENAI_MODEL',
   'SMTP_HOST',
@@ -20,6 +19,27 @@ function requireEnv(name) {
     throw new Error(`Missing required environment variable: ${name}`);
   }
   return value.trim();
+}
+
+
+function optionalEnv(name) {
+  const value = process.env[name];
+  if (!value || !value.trim()) return undefined;
+  return value.trim();
+}
+
+function parseBooleanEnv(value, defaultValue = false) {
+  if (typeof value !== 'string') return defaultValue;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
+  return defaultValue;
+}
+
+function maskSecret(value) {
+  if (!value) return '(empty)';
+  if (value.length <= 4) return '*'.repeat(value.length);
+  return `${value.slice(0, 2)}***${value.slice(-2)}`;
 }
 
 function normalizeApifyToken(raw) {
@@ -92,67 +112,56 @@ Twitter (X): Elon Musk, Sam Altman, Andrej Karpathy, Yann LeCun, Demis Hassabis,
 
 async function runApify() {
   const token = normalizeApifyToken(requireEnv('APIFY_TOKEN'));
-  const actorId = normalizeActorId(requireEnv('APIFY_ACTOR_ID'));
-  const waitForFinish = Number(process.env.APIFY_WAIT_FOR_FINISH_SECONDS || 300);
-  const maxItems = Number(process.env.APIFY_DATASET_LIMIT || 200);
+  const taskId = optionalEnv('APIFY_TASK_ID');
+  const actorId = optionalEnv('APIFY_ACTOR_ID');
 
-  const input = process.env.APIFY_ACTOR_INPUT_JSON
-    ? JSON.parse(process.env.APIFY_ACTOR_INPUT_JSON)
-    : {};
+  if (!taskId && !actorId) {
+    throw new Error('Missing required environment variable: APIFY_TASK_ID or APIFY_ACTOR_ID');
+  }
 
-  const runUrl = new URL(`https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/runs`);
-  runUrl.searchParams.set('waitForFinish', String(waitForFinish));
-  runUrl.searchParams.set('token', token);
+  const inputRaw = optionalEnv('APIFY_ACTOR_INPUT_JSON');
+  const input = inputRaw ? JSON.parse(inputRaw) : undefined;
 
-  const runResp = await fetch(runUrl, {
+  // Prefer task execution when available to keep input source-of-truth in Apify console.
+  const runPath = taskId
+    ? `https://api.apify.com/v2/actor-tasks/${encodeURIComponent(taskId)}/run-sync-get-dataset-items`
+    : `https://api.apify.com/v2/acts/${encodeURIComponent(normalizeActorId(actorId))}/run-sync-get-dataset-items`;
+
+  const runSyncUrl = new URL(runPath);
+  runSyncUrl.searchParams.set('token', token);
+  runSyncUrl.searchParams.set('clean', 'true');
+
+  const requestOptions = {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(input),
-  });
+  };
+
+  if (input !== undefined) {
+    requestOptions.headers = { 'Content-Type': 'application/json' };
+    requestOptions.body = JSON.stringify(input);
+  }
+
+  const runResp = await fetch(runSyncUrl, requestOptions);
 
   if (!runResp.ok) {
     throw new Error(`Apify run failed: ${runResp.status} ${await runResp.text()}`);
   }
 
-  const runJson = await runResp.json();
-  const runData = runJson?.data;
-  if (!runData) {
-    throw new Error('Apify run response missing data.');
-  }
-  if (runData.status !== 'SUCCEEDED') {
-    throw new Error(`Apify run did not succeed. Status: ${runData.status}`);
-  }
-
-  const datasetId = runData.defaultDatasetId;
-  if (!datasetId) {
-    throw new Error('Apify run has no defaultDatasetId.');
-  }
-
-  const datasetUrl = new URL(`https://api.apify.com/v2/datasets/${datasetId}/items`);
-  datasetUrl.searchParams.set('clean', 'true');
-  datasetUrl.searchParams.set('limit', String(maxItems));
-  datasetUrl.searchParams.set('token', token);
-
-  const itemsResp = await fetch(datasetUrl);
-
-  if (!itemsResp.ok) {
-    throw new Error(`Apify dataset fetch failed: ${itemsResp.status} ${await itemsResp.text()}`);
-  }
-
-  const items = await itemsResp.json();
+  const items = await runResp.json();
   if (!Array.isArray(items)) {
-    throw new Error('Apify dataset items are not an array.');
+    throw new Error('Apify returned non-array dataset items.');
   }
 
-  return { items, runData, datasetId };
+  return {
+    items,
+    runData: { id: taskId || normalizeActorId(actorId), status: 'SUCCEEDED' },
+    datasetId: 'run-sync-output',
+  };
 }
 
 async function generateReport(items) {
   if (!Array.isArray(items) || items.length === 0) {
     const today = new Date().toISOString().slice(0, 10);
-    return `# TwitterAI动态日报\n\n日期：${today}\n\n## 今日概览\n\n今日抓取结果为 0 条有效动态，暂无可整理的 Twitter AI 前沿信息。\n\n## 建议排查\n\n1. 检查 Apify Actor 输入配置是否正确（账号列表、时间窗口、过滤条件）。\n2. 检查目标账号是否在抓取时间段内发布了公开内容。\n3. 检查 APIFY_DATASET_LIMIT 与清洗规则是否过于严格。\n`;
+    return `# TwitterAI动态日报\n\n日期：${today}\n\n## 今日概览\n\n今日抓取结果为 0 条有效动态，暂无可整理的 Twitter AI 前沿信息。\n\n## 建议排查\n\n1. 检查 Apify Actor 输入配置是否正确（账号列表、时间窗口、过滤条件）。\n2. 检查目标账号是否在抓取时间段内发布了公开内容。\n3. 检查 Actor 内的过滤规则、时间窗口与账号列表设置。\n`;
   }
 
   const apiKey = requireEnv('OPENAI_API_KEY');
@@ -201,15 +210,34 @@ async function generateReport(items) {
 }
 
 async function sendEmail(reportMarkdown) {
+  const host = requireEnv('SMTP_HOST');
+  const port = Number(requireEnv('SMTP_PORT'));
+  const user = requireEnv('SMTP_USER');
+  const pass = requireEnv('SMTP_PASS');
+  const secure = process.env.SMTP_SECURE
+    ? parseBooleanEnv(process.env.SMTP_SECURE, false)
+    : port === 465;
+
   const transporter = nodemailer.createTransport({
-    host: requireEnv('SMTP_HOST'),
-    port: Number(requireEnv('SMTP_PORT')),
-    secure: process.env.SMTP_SECURE === 'true',
+    host,
+    port,
+    secure,
     auth: {
-      user: requireEnv('SMTP_USER'),
-      pass: requireEnv('SMTP_PASS'),
+      user,
+      pass,
     },
   });
+
+  try {
+    await transporter.verify();
+  } catch (error) {
+    const errMsg = error?.message || String(error);
+    throw new Error(
+      `SMTP verify failed: ${errMsg}\n` +
+        `Current SMTP config => host=${host}, port=${port}, secure=${secure}, user=${maskSecret(user)}\n` +
+        `If your provider is 163/QQ/Gmail, use an SMTP authorization code (app password), not the mailbox login password.`,
+    );
+  }
 
   const now = new Date();
   const subject = process.env.MAIL_SUBJECT || `Twitter AI 动态日报 ${now.toISOString().slice(0, 10)}`;
