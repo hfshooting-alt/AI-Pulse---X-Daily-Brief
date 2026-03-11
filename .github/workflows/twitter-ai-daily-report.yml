@@ -32,6 +32,7 @@ jobs:
           APIFY_TASK_ID: ${{ secrets.APIFY_TASK_ID }}
           APIFY_ACTOR_ID: ${{ secrets.APIFY_ACTOR_ID }}
           APIFY_ACTOR_INPUT_JSON: ${{ secrets.APIFY_ACTOR_INPUT_JSON }}
+          APIFY_PEOPLE_JSON: ${{ secrets.APIFY_PEOPLE_JSON }}
 
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}

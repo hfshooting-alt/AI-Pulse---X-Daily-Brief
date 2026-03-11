@@ -44,3 +44,7 @@ View your app in AI Studio: https://ai.studio/apps/641843a5-ce53-4d86-aa3d-2aab4
 - 邮件正文会将 Markdown 渲染为分级样式 HTML（标题字号、层级列表、颜色区分），并将 `查看原帖` 链接渲染为可点击超链接。
 - 日报格式会自动清理独立 `*` 噪声行，并按章节自动重排编号（避免每条都显示为 `1.`）。
 - 日报模板新增板块：`## 五、AI大厂与投资机构资讯`（若模型漏写会自动补齐占位 UI）。
+
+- 可选：`APIFY_PEOPLE_JSON` 支持传入人物库（JSON数组或每行 `name,item`/`name,handle`）；脚本优先读取 `item` 字段并转换为 `from:<item> since:<date> until:<date>` 形式。
+- 采集逻辑：先按“近7天、最多1000条”拉全量输出并保存 `artifacts/all-outputs.json`，再按输出量排名取TOP20用于“近1天”日报生成。
+- 日报末尾会自动追加附录，列出TOP20人物的真名、账号与输出数量。
