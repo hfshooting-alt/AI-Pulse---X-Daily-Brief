@@ -22,6 +22,20 @@ function requireEnv(name) {
   return value.trim();
 }
 
+function parseBooleanEnv(value, defaultValue = false) {
+  if (typeof value !== 'string') return defaultValue;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
+  return defaultValue;
+}
+
+function maskSecret(value) {
+  if (!value) return '(empty)';
+  if (value.length <= 4) return '*'.repeat(value.length);
+  return `${value.slice(0, 2)}***${value.slice(-2)}`;
+}
+
 function normalizeApifyToken(raw) {
   const value = raw.trim();
   if (value.includes('token=')) {
@@ -201,15 +215,34 @@ async function generateReport(items) {
 }
 
 async function sendEmail(reportMarkdown) {
+  const host = requireEnv('SMTP_HOST');
+  const port = Number(requireEnv('SMTP_PORT'));
+  const user = requireEnv('SMTP_USER');
+  const pass = requireEnv('SMTP_PASS');
+  const secure = process.env.SMTP_SECURE
+    ? parseBooleanEnv(process.env.SMTP_SECURE, false)
+    : port === 465;
+
   const transporter = nodemailer.createTransport({
-    host: requireEnv('SMTP_HOST'),
-    port: Number(requireEnv('SMTP_PORT')),
-    secure: process.env.SMTP_SECURE === 'true',
+    host,
+    port,
+    secure,
     auth: {
-      user: requireEnv('SMTP_USER'),
-      pass: requireEnv('SMTP_PASS'),
+      user,
+      pass,
     },
   });
+
+  try {
+    await transporter.verify();
+  } catch (error) {
+    const errMsg = error?.message || String(error);
+    throw new Error(
+      `SMTP verify failed: ${errMsg}\n` +
+        `Current SMTP config => host=${host}, port=${port}, secure=${secure}, user=${maskSecret(user)}\n` +
+        `If your provider is 163/QQ/Gmail, use an SMTP authorization code (app password), not the mailbox login password.`,
+    );
+  }
 
   const now = new Date();
   const subject = process.env.MAIL_SUBJECT || `Twitter AI 动态日报 ${now.toISOString().slice(0, 10)}`;
