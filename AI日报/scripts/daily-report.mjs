@@ -226,6 +226,100 @@ function normalizeMarkdownLayout(markdown) {
   return `${text}\n`;
 }
 
+
+function escapeHtml(value) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatInlineMarkdown(text) {
+  let out = escapeHtml(text);
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  return out;
+}
+
+function markdownToStyledHtml(markdown) {
+  const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
+  const html = [];
+  let inOl = false;
+  let inUl = false;
+
+  const closeLists = () => {
+    if (inOl) {
+      html.push('</ol>');
+      inOl = false;
+    }
+    if (inUl) {
+      html.push('</ul>');
+      inUl = false;
+    }
+  };
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      closeLists();
+      continue;
+    }
+
+    const h1 = trimmed.match(/^#\s+(.+)/);
+    if (h1) {
+      closeLists();
+      html.push(`<h1 style="font-size:40px;line-height:1.25;margin:16px 0 20px;color:#111827;">${formatInlineMarkdown(h1[1])}</h1>`);
+      continue;
+    }
+
+    const h2 = trimmed.match(/^##\s+(.+)/);
+    if (h2) {
+      closeLists();
+      html.push(`<h2 style="font-size:32px;line-height:1.3;margin:28px 0 14px;color:#111827;">${formatInlineMarkdown(h2[1])}</h2>`);
+      continue;
+    }
+
+    const ordered = trimmed.match(/^\d+\.\s+(.+)/);
+    if (ordered) {
+      if (inUl) {
+        html.push('</ul>');
+        inUl = false;
+      }
+      if (!inOl) {
+        html.push('<ol style="margin:8px 0 16px 28px;padding:0;color:#111827;">');
+        inOl = true;
+      }
+      html.push(`<li style="margin:10px 0;font-size:22px;line-height:1.65;">${formatInlineMarkdown(ordered[1])}</li>`);
+      continue;
+    }
+
+    const bullet = trimmed.match(/^[○■*-]\s+(.+)/);
+    if (bullet) {
+      if (inOl) {
+        html.push('</ol>');
+        inOl = false;
+      }
+      if (!inUl) {
+        html.push('<ul style="margin:8px 0 16px 30px;padding:0;color:#1f2937;">');
+        inUl = true;
+      }
+      html.push(`<li style="margin:6px 0;font-size:20px;line-height:1.75;">${formatInlineMarkdown(bullet[1])}</li>`);
+      continue;
+    }
+
+    closeLists();
+    html.push(`<p style="margin:10px 0;font-size:21px;line-height:1.8;color:#1f2937;">${formatInlineMarkdown(trimmed)}</p>`);
+  }
+
+  closeLists();
+
+  return `<div style="font-family:'PingFang SC','Microsoft YaHei',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f8fafc;padding:24px;border-radius:12px;">${html.join('')}</div>`;
+}
+
 function getPromptTemplate() {
   return process.env.REPORT_PROMPT_TEMPLATE || `你是一个专业的AI行业分析师和情报Agent。
 你的任务是根据我提供的【真实抓取数据】，生成一份今日的“TwitterAI动态日报”。
@@ -372,10 +466,7 @@ async function sendEmail(reportMarkdown) {
     throw new Error('MAIL_TO must contain at least one email recipient.');
   }
 
-  const html = `<pre style="white-space: pre-wrap; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; line-height:1.5">${reportMarkdown
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')}</pre>`;
+  const html = markdownToStyledHtml(reportMarkdown);
 
   await transporter.sendMail({
     from: requireEnv('MAIL_FROM'),

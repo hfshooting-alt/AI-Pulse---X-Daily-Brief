@@ -41,3 +41,4 @@ View your app in AI Studio: https://ai.studio/apps/641843a5-ce53-4d86-aa3d-2aab4
 - 若 `APIFY_ACTOR_INPUT_JSON` 包含 `searchTerms`，脚本会按北京时间（Asia/Shanghai）自动改写每项中的 `since`/`until` 为“昨天→今天”的日期窗口后再调用 Apify。
 - 若模板 JSON 存在尾逗号，脚本会在不改变语义前提下自动修正为合法 JSON 再解析。
 - 运行日志会打印 `Using OPENAI_MODEL=...`，可直接确认 Action 实际调用的模型名。
+- 邮件正文会将 Markdown 渲染为分级样式 HTML（标题字号、层级列表、颜色区分），并将 `查看原帖` 链接渲染为可点击超链接。
