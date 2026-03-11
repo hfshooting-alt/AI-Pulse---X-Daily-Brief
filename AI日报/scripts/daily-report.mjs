@@ -186,7 +186,9 @@ async function requestOpenAIReport({ apiKey, model: selectedModel, prompt }) {
   if (!text) {
     const outputLength = Array.isArray(json?.output) ? json.output.length : 0;
     throw new Error(
-      `OpenAI returned empty textual output. status=${json?.status || 'unknown'}, output_length=${outputLength}`,
+      `SMTP verify failed: ${errMsg}\n` +
+        `Current SMTP config => host=${host}, port=${port}, secure=${secure}, user=${maskSecret(user)}\n` +
+        `If your provider is 163/QQ/Gmail, use an SMTP authorization code (app password), not the mailbox login password.`,
     );
   }
 
