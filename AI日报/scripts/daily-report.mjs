@@ -63,6 +63,51 @@ function normalizeActorId(rawActorId) {
   return actorId.includes('/') ? actorId.replace('/', '~') : actorId;
 }
 
+
+function looksLikeActorIdentifier(value) {
+  if (!value) return false;
+  return value.includes('/') || value.includes('~');
+}
+
+async function fetchApifyDatasetItems({ token, taskId, actorId, input }) {
+  const runPath = taskId
+    ? `https://api.apify.com/v2/actor-tasks/${encodeURIComponent(taskId)}/run-sync-get-dataset-items`
+    : `https://api.apify.com/v2/acts/${encodeURIComponent(normalizeActorId(actorId))}/run-sync-get-dataset-items`;
+
+  const runSyncUrl = new URL(runPath);
+  runSyncUrl.searchParams.set('token', token);
+  runSyncUrl.searchParams.set('clean', 'true');
+
+  const requestOptions = {
+    method: 'POST',
+  };
+
+  if (input !== undefined) {
+    requestOptions.headers = { 'Content-Type': 'application/json' };
+    requestOptions.body = JSON.stringify(input);
+  }
+
+  const runResp = await fetch(runSyncUrl, requestOptions);
+  const responseText = await runResp.text();
+
+  if (!runResp.ok) {
+    throw new Error(`Apify run failed: ${runResp.status} ${responseText}`);
+  }
+
+  let items;
+  try {
+    items = JSON.parse(responseText);
+  } catch {
+    throw new Error(`Apify returned non-JSON response: ${responseText.slice(0, 500)}`);
+  }
+
+  if (!Array.isArray(items)) {
+    throw new Error('Apify returned non-array dataset items.');
+  }
+
+  return items;
+}
+
 function getPromptTemplate() {
   return process.env.REPORT_PROMPT_TEMPLATE || `你是一个专业的AI行业分析师和情报Agent。
 你的任务是根据我提供的【真实抓取数据】，生成一份今日的“TwitterAI动态日报”。
@@ -112,8 +157,12 @@ Twitter (X): Elon Musk, Sam Altman, Andrej Karpathy, Yann LeCun, Demis Hassabis,
 
 async function runApify() {
   const token = normalizeApifyToken(requireEnv('APIFY_TOKEN'));
-  const taskId = optionalEnv('APIFY_TASK_ID');
-  const actorId = optionalEnv('APIFY_ACTOR_ID');
+  const rawTaskId = optionalEnv('APIFY_TASK_ID');
+  const actorIdFromEnv = optionalEnv('APIFY_ACTOR_ID');
+
+  const taskIdLooksLikeActor = looksLikeActorIdentifier(rawTaskId);
+  const taskId = rawTaskId && !taskIdLooksLikeActor ? rawTaskId : undefined;
+  const actorId = actorIdFromEnv || (taskIdLooksLikeActor ? rawTaskId : undefined);
 
   if (!taskId && !actorId) {
     throw new Error('Missing required environment variable: APIFY_TASK_ID or APIFY_ACTOR_ID');
@@ -122,40 +171,29 @@ async function runApify() {
   const inputRaw = optionalEnv('APIFY_ACTOR_INPUT_JSON');
   const input = inputRaw ? JSON.parse(inputRaw) : undefined;
 
-  // Prefer task execution when available to keep input source-of-truth in Apify console.
-  const runPath = taskId
-    ? `https://api.apify.com/v2/actor-tasks/${encodeURIComponent(taskId)}/run-sync-get-dataset-items`
-    : `https://api.apify.com/v2/acts/${encodeURIComponent(normalizeActorId(actorId))}/run-sync-get-dataset-items`;
+  try {
+    const items = await fetchApifyDatasetItems({ token, taskId, actorId, input });
+    return {
+      items,
+      runData: { id: taskId || normalizeActorId(actorId), status: 'SUCCEEDED' },
+      datasetId: 'run-sync-output',
+    };
+  } catch (error) {
+    const message = error?.message || String(error);
+    const canFallbackToActor = taskId && actorId;
+    const isTaskNotFound = /Actor task was not found|record-not-found/i.test(message);
 
-  const runSyncUrl = new URL(runPath);
-  runSyncUrl.searchParams.set('token', token);
-  runSyncUrl.searchParams.set('clean', 'true');
+    if (canFallbackToActor && isTaskNotFound) {
+      const items = await fetchApifyDatasetItems({ token, taskId: undefined, actorId, input });
+      return {
+        items,
+        runData: { id: `${taskId} (fallback->${normalizeActorId(actorId)})`, status: 'SUCCEEDED' },
+        datasetId: 'run-sync-output',
+      };
+    }
 
-  const requestOptions = {
-    method: 'POST',
-  };
-
-  if (input !== undefined) {
-    requestOptions.headers = { 'Content-Type': 'application/json' };
-    requestOptions.body = JSON.stringify(input);
+    throw error;
   }
-
-  const runResp = await fetch(runSyncUrl, requestOptions);
-
-  if (!runResp.ok) {
-    throw new Error(`Apify run failed: ${runResp.status} ${await runResp.text()}`);
-  }
-
-  const items = await runResp.json();
-  if (!Array.isArray(items)) {
-    throw new Error('Apify returned non-array dataset items.');
-  }
-
-  return {
-    items,
-    runData: { id: taskId || normalizeActorId(actorId), status: 'SUCCEEDED' },
-    datasetId: 'run-sync-output',
-  };
 }
 
 async function generateReport(items) {
