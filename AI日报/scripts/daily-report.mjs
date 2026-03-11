@@ -22,6 +22,27 @@ function requireEnv(name) {
   return value.trim();
 }
 
+function normalizeApifyToken(raw) {
+  const value = raw.trim();
+  if (value.includes('token=')) {
+    try {
+      const asUrl = new URL(value);
+      const tokenFromQuery = asUrl.searchParams.get('token');
+      if (tokenFromQuery) return tokenFromQuery;
+    } catch {
+      const match = value.match(/token=([^&\s]+)/);
+      if (match?.[1]) return decodeURIComponent(match[1]);
+    }
+  }
+  return value;
+}
+
+function normalizeActorId(rawActorId) {
+  const actorId = rawActorId.trim();
+  // Apify API path format prefers "username~actor-name".
+  return actorId.includes('/') ? actorId.replace('/', '~') : actorId;
+}
+
 function getPromptTemplate() {
   return process.env.REPORT_PROMPT_TEMPLATE || `你是一个专业的AI行业分析师和情报Agent。
 你的任务是根据我提供的【真实抓取数据】，生成一份今日的“TwitterAI动态日报”。
@@ -70,8 +91,8 @@ Twitter (X): Elon Musk, Sam Altman, Andrej Karpathy, Yann LeCun, Demis Hassabis,
 }
 
 async function runApify() {
-  const token = requireEnv('APIFY_TOKEN');
-  const actorId = requireEnv('APIFY_ACTOR_ID');
+  const token = normalizeApifyToken(requireEnv('APIFY_TOKEN'));
+  const actorId = normalizeActorId(requireEnv('APIFY_ACTOR_ID'));
   const waitForFinish = Number(process.env.APIFY_WAIT_FOR_FINISH_SECONDS || 300);
   const maxItems = Number(process.env.APIFY_DATASET_LIMIT || 200);
 
@@ -79,10 +100,13 @@ async function runApify() {
     ? JSON.parse(process.env.APIFY_ACTOR_INPUT_JSON)
     : {};
 
-  const runResp = await fetch(`https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/runs?waitForFinish=${waitForFinish}`, {
+  const runUrl = new URL(`https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/runs`);
+  runUrl.searchParams.set('waitForFinish', String(waitForFinish));
+  runUrl.searchParams.set('token', token);
+
+  const runResp = await fetch(runUrl, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(input),
@@ -106,9 +130,12 @@ async function runApify() {
     throw new Error('Apify run has no defaultDatasetId.');
   }
 
-  const itemsResp = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?clean=true&limit=${maxItems}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const datasetUrl = new URL(`https://api.apify.com/v2/datasets/${datasetId}/items`);
+  datasetUrl.searchParams.set('clean', 'true');
+  datasetUrl.searchParams.set('limit', String(maxItems));
+  datasetUrl.searchParams.set('token', token);
+
+  const itemsResp = await fetch(datasetUrl);
 
   if (!itemsResp.ok) {
     throw new Error(`Apify dataset fetch failed: ${itemsResp.status} ${await itemsResp.text()}`);
