@@ -29,6 +29,7 @@ jobs:
         run: npm run run:daily-report
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          APIFY_TASK_ID: ${{ secrets.APIFY_TASK_ID }}
           APIFY_ACTOR_ID: ${{ secrets.APIFY_ACTOR_ID }}
           APIFY_ACTOR_INPUT_JSON: ${{ secrets.APIFY_ACTOR_INPUT_JSON }}
 
