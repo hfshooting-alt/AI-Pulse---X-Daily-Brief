@@ -161,6 +161,31 @@ async function requestOpenAIReport({ apiKey, model, prompt }) {
   return text;
 }
 
+
+function normalizeMarkdownLayout(markdown) {
+  if (!markdown || typeof markdown !== 'string') return markdown;
+
+  let text = markdown.replace(/\r\n/g, '\n').trim();
+
+  // Ensure headings start on new lines.
+  text = text.replace(/([^\n])\s+(#{1,6}\s)/g, '$1\n\n$2');
+
+  // Ensure ordered list items are not glued to previous sentence.
+  text = text.replace(/([^\n])\s+(\d+\.\s+)/g, '$1\n\n$2');
+
+  // Ensure bullet lines are separated.
+  text = text.replace(/([^\n])\s+([*-]\s+)/g, '$1\n$2');
+
+  // Keep key labels readable.
+  text = text.replace(/\*\*事件：\*\*/g, '\n  - **事件：**');
+  text = text.replace(/\*\*关键进展：\*\*/g, '\n  - **关键进展：**');
+
+  // Trim excessive blank lines.
+  text = text.replace(/\n{3,}/g, '\n\n').trim();
+
+  return `${text}\n`;
+}
+
 function getPromptTemplate() {
   return process.env.REPORT_PROMPT_TEMPLATE || `你是一个专业的AI行业分析师和情报Agent。
 你的任务是根据我提供的【真实抓取数据】，生成一份今日的“TwitterAI动态日报”。
@@ -205,7 +230,14 @@ Twitter (X): Elon Musk, Sam Altman, Andrej Karpathy, Yann LeCun, Demis Hassabis,
 - 突出重点，提炼核心价值。
 - 忠于事实，避免主观臆断。
 - 每条事实必须附原帖链接。
-- 语言专业、精炼。`;
+- 语言专业、精炼。
+
+【强制排版要求（必须严格遵守）】
+- 仅输出标准 Markdown，不要输出 HTML。
+- 每个标题（# / ##）必须独占一行，前后保留空行。
+- 每个编号条目（1. / 2. / 3.）必须独占一行。
+- “事件/关键进展”使用子级列表缩进，不得与标题写在同一行。
+- 禁止将多个段落、标题、列表拼接在一行。`;
 }
 
 async function runApify() {
@@ -262,7 +294,7 @@ async function generateReport(items) {
         );
       }
 
-      return result;
+      return normalizeMarkdownLayout(result);
     } catch (error) {
       const message = error?.message || String(error);
       if (!isReducibleOpenAIInputError(message)) {
