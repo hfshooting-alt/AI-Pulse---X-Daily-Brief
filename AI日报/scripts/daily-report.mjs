@@ -212,6 +212,8 @@ function getHotspotStats(items) {
     const label = classifyHotspot(extractTextFromItem(item));
     counts.set(label, (counts.get(label) || 0) + 1);
   }
+  return '其他AI动态';
+}
 
   const hotspots = Array.from(counts.entries())
     .map(([label, count]) => ({ label, count }))
@@ -349,74 +351,171 @@ function formatInlineMarkdown(text) {
 }
 
 function markdownToStyledHtml(markdown) {
-  const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
-  const html = [];
-  let inUl = false;
-  let inEventCard = false;
+  const text = String(markdown || '').replace(/\r\n/g, '\n');
+  const lines = text.split('\n').map((l) => l.trim());
 
-  const closeLists = () => {
-    if (inUl) {
-      html.push('</ul>');
-      inUl = false;
+  const titleLine = lines.find((l) => /^#\s+/.test(l));
+  const reportTitle = titleLine ? titleLine.replace(/^#\s+/, '') : 'AI Pulse - X Daily Brief';
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+
+  const summaryHeaderIdx = lines.findIndex((l) => /^##\s+/.test(l) && /today'?s\s*summary|executive\s*summary|今日总结|总结/i.test(l));
+  let summaryLines = [];
+  let summaryEndIdx = -1;
+  if (summaryHeaderIdx >= 0) {
+    summaryEndIdx = lines.length;
+    for (let i = summaryHeaderIdx + 1; i < lines.length; i += 1) {
+      const line = lines[i];
+      if (/^##\s+/.test(line)) {
+        summaryEndIdx = i;
+        break;
+      }
+      if (line) summaryLines.push(line.replace(/^[○■*-]\s+/, ''));
     }
-  };
+  }
 
-  const closeEventCard = () => {
-    closeLists();
-    if (inEventCard) {
-      html.push('</div>');
-      inEventCard = false;
-    }
-  };
-
-  html.push(`<div style="font-family:'PingFang SC','Microsoft YaHei',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:linear-gradient(180deg,#f4f8ff 0%,#f8fafc 32%,#ffffff 100%);padding:24px;border-radius:18px;color:#0f172a;">`);
-
-  for (const raw of lines) {
-    const line = raw.trim();
+  const contentLines = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
     if (!line) continue;
+    if (/^#\s+/.test(line)) continue;
+    if (summaryHeaderIdx >= 0 && i >= summaryHeaderIdx && (summaryEndIdx < 0 || i < summaryEndIdx)) continue;
+    contentLines.push(line);
+  }
 
-    const h1 = line.match(/^#\s+(.+)/);
-    if (h1) {
-      closeEventCard();
-      html.push(`<div style="margin:0 0 22px;padding:18px 20px;border-radius:14px;background:linear-gradient(120deg,#0b1220 0%,#1e293b 100%);box-shadow:0 10px 24px rgba(15,23,42,0.18);"><h1 style="font-size:34px;line-height:1.22;margin:0;color:#f8fafc;letter-spacing:0.2px;">${formatInlineMarkdown(h1[1])}</h1><div style="margin-top:8px;font-size:14px;color:#cbd5e1;">Auto-generated intelligence brief</div></div>`);
+  const events = [];
+  let currentEvent = null;
+  const topSectionNotes = [];
+  const appendixLines = [];
+  let inAppendix = false;
+
+  for (const line of contentLines) {
+    if (/^##\s*TOP20活跃人物/i.test(line)) {
+      if (currentEvent) {
+        events.push(currentEvent);
+        currentEvent = null;
+      }
+      inAppendix = true;
       continue;
     }
 
-    const h2 = line.match(/^##\s+(.+)/);
-    if (h2) {
-      closeEventCard();
-      html.push(`<h2 style="font-size:26px;line-height:1.28;margin:26px 0 12px;color:#0f172a;border-left:5px solid #3b82f6;padding-left:10px;">${formatInlineMarkdown(h2[1])}</h2>`);
+    if (inAppendix) {
+      appendixLines.push(line.replace(/^[○■*-]\s+/, ''));
       continue;
     }
 
     const ordered = line.match(/^(\d+)\.\s+(.+)/);
     if (ordered) {
-      closeEventCard();
-      inEventCard = true;
-      html.push('<div style="margin:12px 0 14px;padding:14px 16px;border-radius:12px;background:#ffffff;border:1px solid #dbeafe;box-shadow:0 6px 18px rgba(30,41,59,0.08);">');
-      html.push(`<div style="display:inline-block;font-size:13px;font-weight:700;color:#1d4ed8;background:#dbeafe;border-radius:999px;padding:3px 10px;margin-bottom:8px;">事件 ${ordered[1]}</div>`);
-      html.push(`<div style="font-size:20px;line-height:1.55;font-weight:700;color:#111827;">${formatInlineMarkdown(ordered[2])}</div>`);
+      if (currentEvent) events.push(currentEvent);
+      currentEvent = { index: Number(ordered[1]), title: ordered[2], analysis: [], why: '', actions: [], sources: [] };
       continue;
     }
 
-    const bullet = line.match(/^[○■*-]\s+(.+)/);
-    if (bullet) {
-      if (!inUl) {
-        html.push('<ul style="margin:10px 0 0 24px;padding:0;color:#1f2937;">');
-        inUl = true;
+    if (currentEvent) {
+      const normalized = line.replace(/^[○■*-]\s+/, '');
+      if (/热点解析[:：]/.test(normalized)) {
+        currentEvent.analysis.push(normalized.replace(/^热点解析[:：]\s*/, ''));
+      } else if (/why it matters|管理层意义|业务影响|重要性/i.test(normalized)) {
+        currentEvent.why = normalized.replace(/^([^:：]+)[:：]\s*/, '');
+      } else if (/相关动态[:：]/.test(normalized)) {
+        const value = normalized.replace(/^相关动态[:：]\s*/, '');
+        if (value) currentEvent.actions.push(value);
+      } else if (/^@/.test(normalized) || /https?:\/\//.test(normalized)) {
+        currentEvent.sources.push(normalized);
+      } else {
+        currentEvent.actions.push(normalized);
       }
-      html.push(`<li style="margin:7px 0;font-size:17px;line-height:1.75;">${formatInlineMarkdown(bullet[1])}</li>`);
-      continue;
+    } else if (!/^##\s+/.test(line)) {
+      topSectionNotes.push(line.replace(/^[○■*-]\s+/, ''));
     }
-
-    closeLists();
-    html.push(`<p style="margin:8px 0 0;font-size:18px;line-height:1.78;color:#334155;">${formatInlineMarkdown(line)}</p>`);
   }
+  if (currentEvent) events.push(currentEvent);
 
-  closeEventCard();
-  html.push(`</div>`);
+  const top3 = events.slice(0, 3);
+  const secondary = events.slice(3);
 
-  return html.join('').replace(/<a /g, '<a style="color:#2563eb;text-decoration:none;font-weight:600;" ');
+  const sectionTitle = (textValue) => `<h2 style="font-size:22px;line-height:1.3;margin:0 0 12px;color:#111827;font-weight:700;">${formatInlineMarkdown(textValue)}</h2>`;
+
+  const renderSourceTags = (items) => {
+    if (!items || items.length === 0) return '';
+    const tags = items.slice(0, 6).map((item) => `<span style="display:inline-block;margin:0 8px 8px 0;padding:4px 10px;border:1px solid #d1d5db;border-radius:999px;font-size:12px;line-height:1.4;color:#374151;">${formatInlineMarkdown(item)}</span>`).join('');
+    return `<div style="margin-top:10px;">${tags}</div>`;
+  };
+
+  const renderEventCard = (event) => {
+    const analysisText = event.analysis.join(' ').trim();
+    const actions = event.actions.slice(0, 5).map((a) => `<li style="margin:0 0 6px 0;color:#1f2937;font-size:14px;line-height:1.65;">${formatInlineMarkdown(a)}</li>`).join('');
+    return `
+      <div style="margin:0 0 14px 0;padding:16px 18px;border:1px solid #e5e7eb;border-radius:10px;background:#ffffff;">
+        <div style="font-size:12px;color:#6b7280;font-weight:600;letter-spacing:0.3px;margin-bottom:6px;">HOT EVENT ${event.index}</div>
+        <div style="font-size:19px;line-height:1.45;color:#111827;font-weight:700;margin-bottom:10px;">${formatInlineMarkdown(event.title)}</div>
+        <div style="font-size:14px;line-height:1.7;color:#1f2937;margin-bottom:10px;">${formatInlineMarkdown(analysisText || '今日核心动态持续演进，建议关注执行节奏与信号变化。')}</div>
+        <div style="margin:0 0 10px 0;padding:10px 12px;background:#f9fafb;border-left:3px solid #111827;font-size:13px;line-height:1.65;color:#111827;"><strong>Why it matters:</strong> ${formatInlineMarkdown(event.why || '对业务节奏、资源配置与外部竞争态势有直接影响。')}</div>
+        ${actions ? `<ul style="margin:0;padding-left:18px;">${actions}</ul>` : ''}
+        ${renderSourceTags(event.sources)}
+      </div>
+    `;
+  };
+
+  const renderTopicCard = (event, idx) => {
+    const summary = (event.analysis.join(' ') || event.actions[0] || '该方向活跃度提升，建议持续跟踪。').trim();
+    return `
+      <div style="margin:0 0 10px 0;padding:12px 14px;border:1px solid #e5e7eb;border-radius:8px;background:#fff;">
+        <div style="font-size:12px;color:#6b7280;font-weight:600;margin-bottom:5px;">TOPIC ${idx + 1}</div>
+        <div style="font-size:15px;line-height:1.55;color:#111827;font-weight:700;margin-bottom:6px;">${formatInlineMarkdown(event.title)}</div>
+        <div style="font-size:13px;line-height:1.6;color:#374151;">${formatInlineMarkdown(summary)}</div>
+      </div>
+    `;
+  };
+
+  const executiveSummary = summaryLines.length > 0 ? summaryLines.slice(0, 4) : [
+    '关键结论：今日高热度集中在AI产品化推进与模型能力迭代。',
+    `主要关注方向：Top 3 热点事件 + ${secondary.length > 0 ? '中热度主题演进' : '重点事件延展'}`,
+    '监测范围：Top20 active AI voices in the last 24h。',
+    '管理层意义：建议关注落地速度、资源投放效率与竞争窗口。',
+  ];
+
+  return `
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f3f4f6;padding:24px 0;margin:0;">
+  <tr>
+    <td align="center">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="720" style="width:720px;max-width:720px;background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
+        <tr>
+          <td style="background:#111827;padding:22px 28px;">
+            <div style="font-size:30px;line-height:1.25;font-weight:700;color:#ffffff;">${formatInlineMarkdown(reportTitle)}</div>
+            <div style="margin-top:8px;font-size:13px;line-height:1.5;color:#d1d5db;">${today} · Auto-generated executive intelligence brief</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:18px 24px 8px 24px;">
+            <div style="border:1px solid #d1d5db;border-left:4px solid #111827;border-radius:8px;background:#f9fafb;padding:14px 14px 12px 14px;">
+              ${sectionTitle('Executive Summary')}
+              <div style="font-size:14px;line-height:1.7;color:#1f2937;">${executiveSummary.map((s) => `<div style="margin-bottom:6px;">${formatInlineMarkdown(s)}</div>`).join('')}</div>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:14px 24px 4px 24px;">
+            ${sectionTitle('Top 3 Hot Events')}
+            ${top3.length > 0 ? top3.map(renderEventCard).join('') : '<div style="font-size:14px;color:#4b5563;padding:12px 0;">今日暂无可用热点事件。</div>'}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:8px 24px 8px 24px;">
+            ${sectionTitle('Secondary Topics')}
+            ${secondary.length > 0 ? secondary.slice(0, 8).map(renderTopicCard).join('') : '<div style="font-size:13px;color:#6b7280;">今日中热度主题较少，建议持续观察明日信号。</div>'}
+          </td>
+        </tr>
+        ${topSectionNotes.length > 0 ? `<tr><td style="padding:6px 24px 12px 24px;"><div style="font-size:13px;color:#6b7280;line-height:1.65;">${topSectionNotes.map((n) => `<div style="margin:0 0 5px 0;">${formatInlineMarkdown(n)}</div>`).join('')}</div></td></tr>` : ''}
+        ${appendixLines.length > 0 ? `<tr><td style="padding:8px 24px 10px 24px;"><div style="border-top:1px solid #e5e7eb;padding-top:10px;">${sectionTitle('Source / Signals')}<div style="font-size:12px;color:#6b7280;line-height:1.65;">${appendixLines.slice(0, 14).map((n) => `<div style="margin:0 0 4px 0;">${formatInlineMarkdown(n)}</div>`).join('')}</div></div></td></tr>` : ''}
+        <tr>
+          <td style="padding:10px 24px 20px 24px;border-top:1px solid #e5e7eb;">
+            <div style="font-size:12px;color:#9ca3af;line-height:1.6;">This brief is generated for management quick-read. Source links are embedded in each event card for direct verification and follow-up.</div>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>`;
 }
 
 
