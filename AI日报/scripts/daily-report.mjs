@@ -226,6 +226,17 @@ function getHotspotStats(items) {
   };
 }
 
+  const hotspots = Array.from(counts.entries())
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => b.count - a.count);
+
+  return {
+    actionCount: items.length,
+    hotspotCount: hotspots.length,
+    hotspots,
+  };
+}
+
 function rankPeople(items, roster) {
   const counts = new Map();
   for (const item of items) {
@@ -266,18 +277,38 @@ async function writeWeeklyCountsTable(ranking) {
 }
 
 
-function appendTop20Appendix(markdown, top20, stats) {
-  const safeStats = stats || { actionCount: 0, hotspotCount: 0, hotspots: [] };
-  const hotspotRows = (safeStats.hotspots || [])
-    .slice(0, 8)
-    .map((h, i) => `${i + 1}. ${h.label}（${h.count}条）`)
-    .join('\n');
+const PEOPLE_PROFILE_MAP = {
+  elonmusk: { title: 'xAI创始人', bio: 'AI与算力叙事核心人物' },
+  sama: { title: 'OpenAI联合创始人', bio: 'OpenAI产品与战略核心' },
+  karpathy: { title: 'Eureka Labs创始人', bio: 'AI教育与工程化代表' },
+  ylecun: { title: 'Meta首席AI科学家', bio: '深度学习研究风向标' },
+  demishassabis: { title: 'Google DeepMind CEO', bio: '谷歌AI战略中枢' },
+  drjimfan: { title: 'NVIDIA高级研究员', bio: '机器人与具身智能前沿' },
+  andrewyng: { title: 'LandingAI创始人', bio: 'AI应用化推动者' },
+  drfeifei: { title: '斯坦福教授', bio: '视觉AI研究代表人物' },
+  ilyasut: { title: 'Safe Superintelligence联合创始人', bio: '新一代AI安全与能力路线' },
+  fchollet: { title: 'Google AI研究员', bio: 'Keras之父，模型评估观点鲜明' },
+  geoffreyhinton: { title: '图灵奖得主', bio: '深度学习奠基者之一' },
+  mustafasuleyman: { title: 'Microsoft AI CEO', bio: '消费级AI产品商业化负责人' },
+  gdb: { title: 'OpenAI产品负责人', bio: '产品化与开发者生态关键人物' },
+  darioamodei: { title: 'Anthropic CEO', bio: 'Claude路线与AI安全代表' },
+  aravsrinivas: { title: 'Perplexity CEO', bio: 'AI搜索产品化代表' },
+  arthurmensch: { title: 'Mistral AI CEO', bio: '欧洲大模型创业代表' },
+  alexandr_wang: { title: 'Scale AI CEO', bio: '数据基础设施与企业AI代表' },
+  billgates: { title: '微软联合创始人', bio: '长期科技趋势观察者' },
+};
 
+function appendTop20Appendix(markdown, top20) {
   const rows = top20
-    .map((p, i) => `${i + 1}. ${p.name}（@${p.handle}）- ${p.outputCount} 条\n   一句话：${p.description || '待补充'}`)
+    .map((p, i) => {
+      const profile = PEOPLE_PROFILE_MAP[normalizeHandle(p.handle)] || {};
+      const title = profile.title || p.title || 'AI从业者';
+      const bio = profile.bio || p.description || '持续活跃于AI一线动态';
+      return `${i + 1}. ${p.name}（@${p.handle}）｜${title}：${bio}`;
+    })
     .join('\n');
 
-  return `${markdown.trim()}\n\n## TOP20活跃人物\n\n- 每日Action数量：${safeStats.actionCount}\n- 每日涉及热点数量：${safeStats.hotspotCount}\n\n### 热点概览（按涉及Action量）\n${hotspotRows || '暂无'}\n\n### 人物清单\n${rows}\n`;
+  return `${markdown.trim()}\n\n## TOP20活跃人物\n\n${rows}\n`;
 }
 
 function relabelSourceLinksWithRealNames(markdown, people) {
@@ -333,7 +364,7 @@ function normalizeMarkdownLayout(markdown) {
   text = cleaned.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 
   if (!/##\s*Today's Summary/i.test(text)) {
-    text += "\n\n## Today's Summary\n\n- 关键结论：今日高热度集中在AI能力落地与产品化推进。\n- 重要原因：头部公司密集发布与资本动作叠加，放大市场关注。\n- 业务影响：建议高管优先布局组织级部署、成本治理与执行效率。";
+    text += "\n\n## Today's Summary\n\n今日高热度集中在AI能力落地与产品化推进，头部公司密集发布与资本动作叠加放大了市场关注，建议管理层优先布局组织级部署、成本治理与执行效率。";
   }
 
   return `${text}\n`;
@@ -433,6 +464,24 @@ function markdownToStyledHtml(markdown) {
   const top3 = events.slice(0, 3);
   const secondary = events.slice(3);
 
+  const topicRules = [
+    { title: '模型与推理能力', kws: ['模型', '推理', 'gpt', 'claude', 'gemini', 'model', 'inference'] },
+    { title: 'Agent与自动化落地', kws: ['agent', '自动化', 'workflow', '编排'] },
+    { title: '产品发布与商业化', kws: ['发布', '商业化', '融资', 'pricing', 'launch', 'funding'] },
+    { title: '算力与基础设施', kws: ['gpu', '芯片', '算力', 'infra', 'nvidia'] },
+  ];
+
+  const grouped = new Map(topicRules.map((r) => [r.title, []]));
+  for (const evt of secondary) {
+    const hay = `${evt.title} ${evt.analysis.join(' ')}`.toLowerCase();
+    const hit = topicRules.find((r) => r.kws.some((k) => hay.includes(String(k).toLowerCase())));
+    grouped.get(hit ? hit.title : topicRules[2].title).push(evt);
+  }
+  const secondaryTopics = Array.from(grouped.entries())
+    .map(([title, items]) => ({ title, items }))
+    .filter((t) => t.items.length > 0)
+    .slice(0, 4);
+
   const sectionTitle = (textValue) => `<h2 style="font-size:22px;line-height:1.3;margin:0 0 12px;color:#111827;font-weight:700;">${formatInlineMarkdown(textValue)}</h2>`;
 
   const renderSourceTags = (items) => {
@@ -467,12 +516,9 @@ function markdownToStyledHtml(markdown) {
     `;
   };
 
-  const executiveSummary = summaryLines.length > 0 ? summaryLines.slice(0, 4) : [
-    '关键结论：今日高热度集中在AI产品化推进与模型能力迭代。',
-    `主要关注方向：Top 3 热点事件 + ${secondary.length > 0 ? '中热度主题演进' : '重点事件延展'}`,
-    '监测范围：Top20 active AI voices in the last 24h。',
-    '管理层意义：建议关注落地速度、资源投放效率与竞争窗口。',
-  ];
+  const executiveSummary = summaryLines.length > 0
+    ? summaryLines.map((t) => t.replace(/^[-•]\s*/, '').replace(/^[^：:]+[：:]\s*/, '')).join('；')
+    : `今日高热度集中在AI产品化推进与模型能力迭代，主要关注方向为Top 3热点与中热度主题演进，监测范围覆盖Top20 active AI voices in the last 24h，对管理层的意义在于优化资源投放效率并把握竞争窗口。`;
 
   return `
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f3f4f6;padding:24px 0;margin:0;">
@@ -486,14 +532,6 @@ function markdownToStyledHtml(markdown) {
           </td>
         </tr>
         <tr>
-          <td style="padding:18px 24px 8px 24px;">
-            <div style="border:1px solid #d1d5db;border-left:4px solid #111827;border-radius:8px;background:#f9fafb;padding:14px 14px 12px 14px;">
-              ${sectionTitle('Executive Summary')}
-              <div style="font-size:14px;line-height:1.7;color:#1f2937;">${executiveSummary.map((s) => `<div style="margin-bottom:6px;">${formatInlineMarkdown(s)}</div>`).join('')}</div>
-            </div>
-          </td>
-        </tr>
-        <tr>
           <td style="padding:14px 24px 4px 24px;">
             ${sectionTitle('Top 3 Hot Events')}
             ${top3.length > 0 ? top3.map(renderEventCard).join('') : '<div style="font-size:14px;color:#4b5563;padding:12px 0;">今日暂无可用热点事件。</div>'}
@@ -502,11 +540,19 @@ function markdownToStyledHtml(markdown) {
         <tr>
           <td style="padding:8px 24px 8px 24px;">
             ${sectionTitle('Secondary Topics')}
-            ${secondary.length > 0 ? secondary.slice(0, 8).map(renderTopicCard).join('') : '<div style="font-size:13px;color:#6b7280;">今日中热度主题较少，建议持续观察明日信号。</div>'}
+            ${secondaryTopics.length > 0 ? secondaryTopics.map((topic, i) => `<div style=\"margin-bottom:12px;\"><div style=\"font-size:13px;color:#374151;font-weight:700;margin:0 0 6px 0;\">${i + 1}. ${formatInlineMarkdown(topic.title)}</div>${topic.items.slice(0, 4).map(renderTopicCard).join('')}</div>`).join('') : '<div style="font-size:13px;color:#6b7280;">今日中热度主题较少，建议持续观察明日信号。</div>'}
           </td>
         </tr>
+        <tr>
+          <td style="padding:8px 24px 8px 24px;">
+            <div style="border:1px solid #d1d5db;border-left:4px solid #111827;border-radius:8px;background:#f9fafb;padding:14px 14px 12px 14px;">
+              ${sectionTitle('Executive Summary')}
+              <div style="font-size:14px;line-height:1.75;color:#1f2937;">${formatInlineMarkdown(executiveSummary)}</div>
+            </div>
+          </td>
+        </tr>
+        ${appendixLines.length > 0 ? `<tr><td style="padding:8px 24px 10px 24px;"><div style="border-top:1px solid #e5e7eb;padding-top:10px;">${sectionTitle('TOP20活跃人物')}<div style="font-size:12px;color:#6b7280;line-height:1.65;">${appendixLines.map((n) => `<div style="margin:0 0 4px 0;">${formatInlineMarkdown(n)}</div>`).join('')}</div></div></td></tr>` : ''}
         ${topSectionNotes.length > 0 ? `<tr><td style="padding:6px 24px 12px 24px;"><div style="font-size:13px;color:#6b7280;line-height:1.65;">${topSectionNotes.map((n) => `<div style="margin:0 0 5px 0;">${formatInlineMarkdown(n)}</div>`).join('')}</div></td></tr>` : ''}
-        ${appendixLines.length > 0 ? `<tr><td style="padding:8px 24px 10px 24px;"><div style="border-top:1px solid #e5e7eb;padding-top:10px;">${sectionTitle('Source / Signals')}<div style="font-size:12px;color:#6b7280;line-height:1.65;">${appendixLines.slice(0, 14).map((n) => `<div style="margin:0 0 4px 0;">${formatInlineMarkdown(n)}</div>`).join('')}</div></div></td></tr>` : ''}
         <tr>
           <td style="padding:10px 24px 20px 24px;border-top:1px solid #e5e7eb;">
             <div style="font-size:12px;color:#9ca3af;line-height:1.6;">This brief is generated for management quick-read. Source links are embedded in each event card for direct verification and follow-up.</div>
@@ -527,9 +573,9 @@ function getPromptTemplate() {
 
 输出要求：
 1) 先输出TOP3热度事件（按相关输出量排序）
-2) 再输出7-12条中热度事件，按3-4个聚类大点组织
+2) 再输出7-12条中热度事件，按2-4个Topic组织（Topic标题不要出现“聚类”二字）
 3) 不需要按传统行业大类分类
-4) 每个事件统一结构：\n   - ○ **热点解析：** [事件抽象总结]\n   - ○ **相关动态：** [参与者动态，分点列出]\n5) 不要输出“聚类一/二/三”字样；不要输出“额外观察”与“AI大厂与投资机构资讯”板块\n6) 关联动态中的来源链接，不使用“查看原帖”，统一写成 [@本名](url)（本名不是X用户名）\n7) 文末新增 Today\'s Summary 板块，用3条结构化要点（关键结论/重要原因/业务影响），总计不超过200字\n8) 输出Markdown，结构清晰，分级列表明确
+4) 每个事件统一结构：\n   - ○ **热点解析：** [事件抽象总结]\n   - ○ **相关动态：** [参与者动态，分点列出]\n5) 不要输出“聚类一/二/三”字样；不要输出“额外观察”与“AI大厂与投资机构资讯”板块\n6) 关联动态中的来源链接，不使用“查看原帖”，统一写成 [@本名](url)（本名不是X用户名）\n7) 文末新增 Today's Summary 板块，用一个自然段完成（不分点，不超过200字）\n8) 输出Markdown，结构清晰，分级列表明确
 `;
 }
 
@@ -571,7 +617,7 @@ async function generateReport(items, top20, stats) {
   const markdown = await requestOpenAIReport({ apiKey, model, prompt });
   const normalized = normalizeMarkdownLayout(markdown);
   const withRealNameLinks = relabelSourceLinksWithRealNames(normalized, top20);
-  return appendTop20Appendix(withRealNameLinks, top20, stats);
+  return appendTop20Appendix(withRealNameLinks, top20);
 }
 
 async function sendEmail(reportMarkdown) {
