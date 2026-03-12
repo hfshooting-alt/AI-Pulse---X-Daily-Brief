@@ -329,71 +329,74 @@ function formatInlineMarkdown(text) {
 function markdownToStyledHtml(markdown) {
   const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
   const html = [];
-  let inOl = false;
   let inUl = false;
+  let inEventCard = false;
 
   const closeLists = () => {
-    if (inOl) {
-      html.push('</ol>');
-      inOl = false;
-    }
     if (inUl) {
       html.push('</ul>');
       inUl = false;
     }
   };
 
+  const closeEventCard = () => {
+    closeLists();
+    if (inEventCard) {
+      html.push('</div>');
+      inEventCard = false;
+    }
+  };
+
+  html.push(`<div style="font-family:'PingFang SC','Microsoft YaHei',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:linear-gradient(180deg,#f4f8ff 0%,#f8fafc 32%,#ffffff 100%);padding:24px;border-radius:18px;color:#0f172a;">`);
+
   for (const raw of lines) {
     const line = raw.trim();
-    if (!line) {
-      closeLists();
-      continue;
-    }
+    if (!line) continue;
+
     const h1 = line.match(/^#\s+(.+)/);
     if (h1) {
-      closeLists();
-      html.push(`<h1 style="font-size:40px;line-height:1.25;margin:16px 0 20px;color:#111827;">${formatInlineMarkdown(h1[1])}</h1>`);
+      closeEventCard();
+      html.push(`<div style="margin:0 0 22px;padding:18px 20px;border-radius:14px;background:linear-gradient(120deg,#0b1220 0%,#1e293b 100%);box-shadow:0 10px 24px rgba(15,23,42,0.18);"><h1 style="font-size:34px;line-height:1.22;margin:0;color:#f8fafc;letter-spacing:0.2px;">${formatInlineMarkdown(h1[1])}</h1><div style="margin-top:8px;font-size:14px;color:#cbd5e1;">Auto-generated intelligence brief</div></div>`);
       continue;
     }
+
     const h2 = line.match(/^##\s+(.+)/);
     if (h2) {
-      closeLists();
-      html.push(`<h2 style="font-size:32px;line-height:1.3;margin:28px 0 14px;color:#111827;">${formatInlineMarkdown(h2[1])}</h2>`);
+      closeEventCard();
+      html.push(`<h2 style="font-size:26px;line-height:1.28;margin:26px 0 12px;color:#0f172a;border-left:5px solid #3b82f6;padding-left:10px;">${formatInlineMarkdown(h2[1])}</h2>`);
       continue;
     }
-    const ordered = line.match(/^\d+\.\s+(.+)/);
+
+    const ordered = line.match(/^(\d+)\.\s+(.+)/);
     if (ordered) {
-      if (inUl) {
-        html.push('</ul>');
-        inUl = false;
-      }
-      if (!inOl) {
-        html.push('<ol style="margin:8px 0 16px 28px;padding:0;color:#111827;">');
-        inOl = true;
-      }
-      html.push(`<li style="margin:10px 0;font-size:22px;line-height:1.65;">${formatInlineMarkdown(ordered[1])}</li>`);
+      closeEventCard();
+      inEventCard = true;
+      html.push('<div style="margin:12px 0 14px;padding:14px 16px;border-radius:12px;background:#ffffff;border:1px solid #dbeafe;box-shadow:0 6px 18px rgba(30,41,59,0.08);">');
+      html.push(`<div style="display:inline-block;font-size:13px;font-weight:700;color:#1d4ed8;background:#dbeafe;border-radius:999px;padding:3px 10px;margin-bottom:8px;">事件 ${ordered[1]}</div>`);
+      html.push(`<div style="font-size:20px;line-height:1.55;font-weight:700;color:#111827;">${formatInlineMarkdown(ordered[2])}</div>`);
       continue;
     }
+
     const bullet = line.match(/^[○■*-]\s+(.+)/);
     if (bullet) {
-      if (inOl) {
-        html.push('</ol>');
-        inOl = false;
-      }
       if (!inUl) {
-        html.push('<ul style="margin:8px 0 16px 30px;padding:0;color:#1f2937;">');
+        html.push('<ul style="margin:10px 0 0 24px;padding:0;color:#1f2937;">');
         inUl = true;
       }
-      html.push(`<li style="margin:6px 0;font-size:20px;line-height:1.75;">${formatInlineMarkdown(bullet[1])}</li>`);
+      html.push(`<li style="margin:7px 0;font-size:17px;line-height:1.75;">${formatInlineMarkdown(bullet[1])}</li>`);
       continue;
     }
+
     closeLists();
-    html.push(`<p style="margin:10px 0;font-size:21px;line-height:1.8;color:#1f2937;">${formatInlineMarkdown(line)}</p>`);
+    html.push(`<p style="margin:8px 0 0;font-size:18px;line-height:1.78;color:#334155;">${formatInlineMarkdown(line)}</p>`);
   }
 
-  closeLists();
-  return `<div style="font-family:'PingFang SC','Microsoft YaHei',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f8fafc;padding:24px;border-radius:12px;">${html.join('')}</div>`;
+  closeEventCard();
+  html.push(`</div>`);
+
+  return html.join('').replace(/<a /g, '<a style="color:#2563eb;text-decoration:none;font-weight:600;" ');
 }
+
 
 function getPromptTemplate() {
   return process.env.REPORT_PROMPT_TEMPLATE || `你是一个专业的AI行业分析师和情报Agent。
