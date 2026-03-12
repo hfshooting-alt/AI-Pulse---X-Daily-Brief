@@ -4,7 +4,6 @@ import nodemailer from 'nodemailer';
 
 const requiredEnv = [
   'APIFY_TOKEN',
-  'APIFY_ACTOR_ID',
   'OPENAI_API_KEY',
   'OPENAI_MODEL',
   'SMTP_HOST',
@@ -215,6 +214,8 @@ function getHotspotStats(items) {
     const label = classifyHotspot(extractTextFromItem(item));
     counts.set(label, (counts.get(label) || 0) + 1);
   }
+  return '其他AI动态';
+}
 
   const hotspots = Array.from(counts.entries())
     .map(([label, count]) => ({ label, count }))
