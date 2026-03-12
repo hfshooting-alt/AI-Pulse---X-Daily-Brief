@@ -46,8 +46,7 @@ View your app in AI Studio: https://ai.studio/apps/641843a5-ce53-4d86-aa3d-2aab4
 
 - 可选：`APIFY_PEOPLE_JSON` 支持传入人物库（JSON数组或每行 `name,item`/`name,handle`）；脚本优先读取 `item` 字段并转换为 `from:<item> since:<date> until:<date>` 形式。
 - 采集逻辑：先按“近7天、最多1000条”拉全量输出并保存 `artifacts/all-outputs.json`，再按输出量排名取TOP20用于“近1天”日报生成。
-- 同时会在桌面输出每人近7天动态数表格：`~/Desktop/ai-weekly-output-counts.md` 与 `~/Desktop/ai-weekly-output-counts.csv`。
-- 在 GitHub Actions 中也会写入 `AI日报/artifacts/ai-weekly-output-counts.md` 与 `AI日报/artifacts/ai-weekly-output-counts.csv`，并随 workflow artifact 一起下载。
+- 每人近7天动态数表格会写入 `AI日报/artifacts/ai-weekly-output-counts.md` 与 `AI日报/artifacts/ai-weekly-output-counts.csv`，并随 workflow artifact 一起下载。
 - 日报末尾会自动追加附录，列出TOP20人物的真名、账号与输出数量。
 
 - 日报主标题统一为 `AI Pulse - X Daily Brief`。

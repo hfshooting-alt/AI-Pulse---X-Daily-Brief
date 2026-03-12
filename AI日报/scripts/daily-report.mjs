@@ -254,22 +254,15 @@ async function writeWeeklyCountsTable(ranking) {
   const csvRows = ranking.map((p, i) => `${i + 1},"${String(p.name).replaceAll('"', '""')}",${p.handle},${p.outputCount}`);
   const csv = `${csvHeader}\n${csvRows.join('\n')}\n`;
 
-  const desktopDir = path.join(process.env.HOME || '.', 'Desktop');
-  await fs.mkdir(desktopDir, { recursive: true });
-  const markdownPath = path.join(desktopDir, 'ai-weekly-output-counts.md');
-  const csvPath = path.join(desktopDir, 'ai-weekly-output-counts.csv');
-
   const artifactsDir = 'artifacts';
   await fs.mkdir(artifactsDir, { recursive: true });
-  const artifactMarkdownPath = path.join(artifactsDir, 'ai-weekly-output-counts.md');
-  const artifactCsvPath = path.join(artifactsDir, 'ai-weekly-output-counts.csv');
+  const artifactMarkdownPath = `${artifactsDir}/ai-weekly-output-counts.md`;
+  const artifactCsvPath = `${artifactsDir}/ai-weekly-output-counts.csv`;
 
-  await fs.writeFile(markdownPath, markdown, 'utf8');
-  await fs.writeFile(csvPath, csv, 'utf8');
   await fs.writeFile(artifactMarkdownPath, markdown, 'utf8');
   await fs.writeFile(artifactCsvPath, csv, 'utf8');
 
-  return { markdownPath, csvPath, artifactMarkdownPath, artifactCsvPath };
+  return { artifactMarkdownPath, artifactCsvPath };
 }
 
 
@@ -673,7 +666,7 @@ async function main() {
   await fs.writeFile('artifacts/top20-ranking.json', JSON.stringify(top20, null, 2), 'utf8');
 
   const tablePaths = await writeWeeklyCountsTable(ranking);
-  console.log(`Weekly output table saved: ${tablePaths.markdownPath}, ${tablePaths.csvPath}, ${tablePaths.artifactMarkdownPath}, ${tablePaths.artifactCsvPath}`);
+  console.log(`Weekly output table saved: ${tablePaths.artifactMarkdownPath}, ${tablePaths.artifactCsvPath}`);
 
   const dailyInput = buildApifyInput(templateInput, top20.map((p) => p.handle), yesterday, today, 1000);
   if (top20.length > 0) console.log(`Example daily searchTerm: from:${top20[0].handle} since:${yesterday} until:${today}`);
