@@ -43,7 +43,6 @@ View your app in AI Studio: https://ai.studio/apps/641843a5-ce53-4d86-aa3d-2aab4
 - 运行日志会打印 `Using OPENAI_MODEL=...`，可直接确认 Action 实际调用的模型名。
 - 邮件正文会将 Markdown 渲染为分级样式 HTML（标题字号、层级列表、颜色区分），并将来源链接渲染为可点击 `@本名` 超链接。
 - 日报格式会自动清理独立 `*` 噪声行，并按章节自动重排编号（避免每条都显示为 `1.`）。
-- 日报模板新增板块：`## 五、AI大厂与投资机构资讯`（若模型漏写会自动补齐占位 UI）。
 
 - 可选：`APIFY_PEOPLE_JSON` 支持传入人物库（JSON数组或每行 `name,item`/`name,handle`）；脚本优先读取 `item` 字段并转换为 `from:<item> since:<date> until:<date>` 形式。
 - 采集逻辑：先按“近7天、最多1000条”拉全量输出并保存 `artifacts/all-outputs.json`，再按输出量排名取TOP20用于“近1天”日报生成。
@@ -52,3 +51,5 @@ View your app in AI Studio: https://ai.studio/apps/641843a5-ce53-4d86-aa3d-2aab4
 - 日报主标题统一为 `AI Pulse - X Daily Brief`。
 - 来源链接文案统一为 `@本名` 超链接（不再使用“查看原帖”与X用户名显示）。
 - 事件结构统一为“热点解析 + 相关动态”。
+
+- 附录标题统一为 `TOP20活跃人物`，每位人物包含：本名、账号、输出数量、一句话描述（来自人物库 description/desc/bio 字段）。

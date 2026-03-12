@@ -87,6 +87,7 @@ function parsePeopleRoster(raw) {
             handle: normalizeHandle(
               row?.item || row?.handle || row?.username || row?.account || row?.twitter || row?.x || row?.id,
             ),
+            description: String(row?.description || row?.desc || row?.bio || row?.note || '').trim(),
           };
         })
         .filter((r) => r.handle);
@@ -102,7 +103,7 @@ function parsePeopleRoster(raw) {
         ? line.split(',').map((v) => v.trim())
         : line.split(/\s+/).map((v) => v.trim());
       const [name, itemOrHandle] = parts;
-      return { name: name || itemOrHandle, handle: normalizeHandle(itemOrHandle || name) };
+      return { name: name || itemOrHandle, handle: normalizeHandle(itemOrHandle || name), description: '' };
     })
     .filter((r) => r.handle);
 }
@@ -196,15 +197,22 @@ function rankPeople(items, roster) {
     counts.set(handle, (counts.get(handle) || 0) + 1);
   }
 
-  const names = new Map(roster.map((r) => [normalizeHandle(r.handle), r.name || r.handle]));
+  const meta = new Map(roster.map((r) => [normalizeHandle(r.handle), { name: r.name || r.handle, description: r.description || '' }]));
   return Array.from(counts.entries())
-    .map(([handle, outputCount]) => ({ name: names.get(handle) || handle, handle, outputCount }))
+    .map(([handle, outputCount]) => ({
+      name: (meta.get(handle)?.name) || handle,
+      description: (meta.get(handle)?.description) || '',
+      handle,
+      outputCount,
+    }))
     .sort((a, b) => b.outputCount - a.outputCount);
 }
 
 function appendTop20Appendix(markdown, top20) {
-  const rows = top20.map((p, i) => `${i + 1}. ${p.name}（@${p.handle}）- ${p.outputCount}`).join('\n');
-  return `${markdown.trim()}\n\n## 附录：今日TOP20活跃人物\n\n${rows}\n`;
+  const rows = top20
+    .map((p, i) => `${i + 1}. ${p.name}（@${p.handle}）- ${p.outputCount} 条\n   一句话：${p.description || '待补充'}`)
+    .join('\n');
+  return `${markdown.trim()}\n\n## TOP20活跃人物\n\n${rows}\n`;
 }
 
 function relabelSourceLinksWithRealNames(markdown, people) {
@@ -231,25 +239,33 @@ function normalizeMarkdownLayout(markdown) {
   text = text.replace(/^\s*\*\s*$/gm, '');
   text = text.replace(/([^\n])\s+(#{1,6}\s)/g, '$1\n\n$2');
   text = text.replace(/([^\n])\s+(\d+\.\s+)/g, '$1\n\n$2');
-  text = text.replace(/\*\*事件：\*\*/g, '\n  ○ **热点解析：**');
-  text = text.replace(/\*\*关键进展：\*\*/g, '\n  ○ **相关动态：**');
+  text = text.replace(/\*\*事件：\*\*/g, '\n○ **热点解析：**');
+  text = text.replace(/\*\*关键进展：\*\*/g, '\n○ **相关动态：**');
 
-  const lines = text.split('\n');
+  // remove unwanted section blocks
+  text = text.replace(/\n##\s*(四、其他值得关注的动向|五、AI大厂与投资机构资讯|额外观察)[\s\S]*?(?=\n##\s|$)/g, '');
+
+  const lines = text.split('\n').map((line) => line.replace(/^\s*[•*-]\s*○\s*/, '○ ').replace(/^\s*[•*-]\s*■\s*/, '■ '));
+
+  // remove noisy lines like ### or cluster labels
+  const cleaned = lines.filter((line) => {
+    const t = line.trim();
+    if (t === '###') return false;
+    if (/^聚类[一二三四五六七八九十0-9]+[:：]/.test(t)) return false;
+    return true;
+  });
+
+  // renumber all top-level ordered items sequentially
   let idx = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    if (/^##\s+/.test(lines[i].trim())) idx = 0;
-    const m = lines[i].match(/^(\s*)\d+\.\s+(.*)$/);
+  for (let i = 0; i < cleaned.length; i += 1) {
+    const m = cleaned[i].match(/^(\s*)\d+\.\s+(.*)$/);
     if (m) {
       idx += 1;
-      lines[i] = `${m[1]}${idx}. ${m[2]}`;
+      cleaned[i] = `${m[1]}${idx}. ${m[2]}`;
     }
   }
-  text = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 
-  if (!/##\s*五、AI大厂与投资机构资讯/.test(text)) {
-    text += '\n\n## 五、AI大厂与投资机构资讯\n\n1. **（占位）待补充大厂与投资机构动态**\n   ○ **事件：** 待补充。\n   ○ **关键进展：**\n     ■ **要点1：** 待补充。\n';
-  }
-
+  text = cleaned.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   return `${text}\n`;
 }
 
@@ -343,11 +359,7 @@ function getPromptTemplate() {
 1) 先输出TOP3热度事件（按相关输出量排序）
 2) 再输出7-12条中热度事件，按3-4个聚类大点组织
 3) 不需要按传统行业大类分类
-4) 每个事件统一结构：
-   - ○ **热点解析：** [事件抽象总结]
-   - ○ **相关动态：** [参与者动态，分点列出]
-5) 关联动态中的来源链接，不使用“查看原帖”，统一写成 [@本名](url)（本名不是X用户名）
-6) 输出Markdown，结构清晰，分级列表明确
+4) 每个事件统一结构：\n   - ○ **热点解析：** [事件抽象总结]\n   - ○ **相关动态：** [参与者动态，分点列出]\n5) 不要输出“聚类一/二/三”字样；不要输出“额外观察”与“AI大厂与投资机构资讯”板块\n6) 关联动态中的来源链接，不使用“查看原帖”，统一写成 [@本名](url)（本名不是X用户名）\n7) 输出Markdown，结构清晰，分级列表明确
 `;
 }
 
