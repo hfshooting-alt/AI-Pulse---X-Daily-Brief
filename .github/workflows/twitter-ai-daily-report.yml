@@ -18,7 +18,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: AI日报/package-lock.json
 
@@ -31,8 +31,7 @@ jobs:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           APIFY_ACTOR_ID: ${{ secrets.APIFY_ACTOR_ID }}
           APIFY_ACTOR_INPUT_JSON: ${{ secrets.APIFY_ACTOR_INPUT_JSON }}
-          APIFY_WAIT_FOR_FINISH_SECONDS: ${{ secrets.APIFY_WAIT_FOR_FINISH_SECONDS }}
-          APIFY_DATASET_LIMIT: ${{ secrets.APIFY_DATASET_LIMIT }}
+          APIFY_PEOPLE_JSON: ${{ secrets.APIFY_PEOPLE_JSON }}
 
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
@@ -48,9 +47,12 @@ jobs:
           MAIL_TO: ${{ secrets.MAIL_TO }}
           MAIL_SUBJECT: ${{ secrets.MAIL_SUBJECT }}
 
-      - name: Upload markdown artifact
+      - name: Upload report artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: twitter-ai-daily-report
-          path: AI日报/artifacts/daily-report.md
+          path: |
+            AI日报/artifacts/daily-report.md
+            AI日报/artifacts/ai-weekly-output-counts.md
+            AI日报/artifacts/ai-weekly-output-counts.csv
