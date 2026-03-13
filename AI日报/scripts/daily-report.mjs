@@ -523,15 +523,17 @@ function markdownToStyledHtml(markdown) {
 
   const renderSecondaryTopicGroup = (topic, idx) => {
     const topicItems = topic.items.slice(0, 4).map((event, j) => {
-      const dynamicText = event.actions[0] || event.analysis[0] || event.title;
+      const dynamicText = (event.actions[0] || event.analysis[0] || event.title || '').trim();
+      const sourceLink = (event.sources && event.sources.length > 0) ? event.sources[0] : '';
+      const composed = sourceLink && !dynamicText.includes('http') ? `${dynamicText} ${sourceLink}`.trim() : dynamicText;
       return `<div style="margin:0 0 10px 0;padding:10px 12px;border:1px solid #E5E7EB;border-radius:8px;background:#FFFFFF;">
         <div style="font-size:16px;font-weight:700;line-height:1.55;color:#111827;margin-bottom:4px;">动态${j + 1}：${formatInlineMarkdown(event.title)}</div>
-        <div style="font-size:16px;line-height:1.68;color:#4B5563;">${formatInlineMarkdown(dynamicText)}</div>
+        <div style="font-size:16px;line-height:1.68;color:#4B5563;">${formatInlineMarkdown(composed)}</div>
       </div>`;
     }).join('');
 
     return `
-      <div style="display:inline-block;vertical-align:top;width:48%;margin:0 1% 14px 1%;padding:14px;border:1px solid #E5E7EB;border-radius:10px;background:#F8FAFC;box-sizing:border-box;">
+      <div style="display:block;width:100%;margin:0 0 14px 0;padding:14px;border:1px solid #E5E7EB;border-radius:10px;background:#F8FAFC;box-sizing:border-box;">
         <div style="font-size:20px;line-height:1.45;color:#111827;font-weight:700;margin-bottom:10px;">热点${idx + 1}：${formatInlineMarkdown(topic.title)}</div>
         ${topicItems}
       </div>
