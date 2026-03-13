@@ -220,26 +220,22 @@ const getHotspotStats = (items) => {
     .map(([label, count]) => ({ label, count }))
     .sort((a, b) => b.count - a.count);
 
-  return {
+  const stats = {
     actionCount: items.length,
     hotspotCount: hotspots.length,
     hotspots,
   };
+  return stats;
 };
 
-
-function rankPeople(items, roster) {
-  const counts = new Map();
-  for (const item of items) {
+const rankPeople = (items, roster) => {
+  const counts = items.reduce((map, item) => {
     const handle = extractHandleFromItem(item);
-    if (!handle) continue;
-    counts.set(handle, (counts.get(handle) || 0) + 1);
-  }
-  return '其他AI动态';
-}
+    return handle ? (map.set(handle, (map.get(handle) || 0) + 1), map) : map;
+  }, new Map());
 
   const meta = new Map(roster.map((r) => [normalizeHandle(r.handle), { name: r.name || r.handle, title: r.title || '', description: r.description || '' }]));
-  return Array.from(counts.entries())
+  const ranked = Array.from(counts.entries())
     .map(([handle, outputCount]) => ({
       name: (meta.get(handle)?.name) || handle,
       title: (meta.get(handle)?.title) || '',
@@ -248,52 +244,10 @@ function rankPeople(items, roster) {
       outputCount,
     }))
     .sort((a, b) => b.outputCount - a.outputCount);
-}
 
-async function writeWeeklyCountsTable(ranking) {
-  const header = '| 排名 | 本名 | X账号 | 近一周动态数量 |\n|---:|---|---|---:|';
-  const rows = ranking.map((p, i) => `| ${i + 1} | ${p.name} | @${p.handle} | ${p.outputCount} |`);
-  const markdown = `${header}\n${rows.join('\n')}\n`;
-  const csvHeader = 'rank,name,handle,weekly_output_count';
-  const csvRows = ranking.map((p, i) => `${i + 1},"${String(p.name).replaceAll('"', '""')}",${p.handle},${p.outputCount}`);
-  const csv = `${csvHeader}\n${csvRows.join('\n')}\n`;
+  return ranked;
+};
 
-  const artifactsDir = 'artifacts';
-  await fs.mkdir(artifactsDir, { recursive: true });
-  const artifactMarkdownPath = `${artifactsDir}/ai-weekly-output-counts.md`;
-  const artifactCsvPath = `${artifactsDir}/ai-weekly-output-counts.csv`;
-
-  const meta = new Map(roster.map((r) => [normalizeHandle(r.handle), { name: r.name || r.handle, title: r.title || '', description: r.description || '' }]));
-  return Array.from(counts.entries())
-    .map(([handle, outputCount]) => ({
-      name: (meta.get(handle)?.name) || handle,
-      title: (meta.get(handle)?.title) || '',
-      description: (meta.get(handle)?.description) || '',
-      handle,
-      outputCount,
-    }))
-    .sort((a, b) => b.outputCount - a.outputCount);
-}
-
-async function writeWeeklyCountsTable(ranking) {
-  const header = '| 排名 | 本名 | X账号 | 近一周动态数量 |\n|---:|---|---|---:|';
-  const rows = ranking.map((p, i) => `| ${i + 1} | ${p.name} | @${p.handle} | ${p.outputCount} |`);
-  const markdown = `${header}\n${rows.join('\n')}\n`;
-  const csvHeader = 'rank,name,handle,weekly_output_count';
-  const csvRows = ranking.map((p, i) => `${i + 1},"${String(p.name).replaceAll('"', '""')}",${p.handle},${p.outputCount}`);
-  const csv = `${csvHeader}\n${csvRows.join('\n')}\n`;
-
-  const meta = new Map(roster.map((r) => [normalizeHandle(r.handle), { name: r.name || r.handle, title: r.title || '', description: r.description || '' }]));
-  return Array.from(counts.entries())
-    .map(([handle, outputCount]) => ({
-      name: (meta.get(handle)?.name) || handle,
-      title: (meta.get(handle)?.title) || '',
-      description: (meta.get(handle)?.description) || '',
-      handle,
-      outputCount,
-    }))
-    .sort((a, b) => b.outputCount - a.outputCount);
-}
 
 async function writeWeeklyCountsTable(ranking) {
   const header = '| 排名 | 本名 | X账号 | 近一周动态数量 |\n|---:|---|---|---:|';
