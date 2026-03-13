@@ -499,22 +499,30 @@ function markdownToStyledHtml(markdown) {
     .filter((t) => t.items.length > 0)
     .slice(0, 4);
 
-  const sectionTitle = (textValue) => `<h2 style="font-size:24px;line-height:1.35;margin:0 0 14px;color:#111827;font-weight:700;">${formatInlineMarkdown(textValue)}</h2>`;
+  const sectionTitle = (textValue) => `<h2 style="font-size:24px;line-height:1.35;margin:0;color:#111827;font-weight:700;">${formatInlineMarkdown(textValue)}</h2>`;
+
+  const renderSectionBlock = (label, title, content) => `
+    <div style="border:1px solid #E5E7EB;border-radius:12px;background:#FFFFFF;padding:16px 16px 10px 16px;margin:0 0 14px 0;">
+      <div style="font-size:13px;line-height:1.4;font-weight:700;letter-spacing:0.6px;color:#2563EB;text-transform:uppercase;margin:0 0 6px 0;">${formatInlineMarkdown(label)}</div>
+      <div style="margin:0 0 12px 0;">${sectionTitle(title)}</div>
+      ${content}
+    </div>
+  `;
 
   const renderSourceTags = (items) => {
     if (!items || items.length === 0) return '';
-    const tags = items.slice(0, 6).map((item) => `<span style="display:inline-block;margin:0 8px 8px 0;padding:6px 12px;border:1px solid #E5E7EB;border-radius:999px;background:#F8FAFC;font-size:12px;line-height:1.4;font-weight:500;color:#6B7280;">${formatInlineMarkdown(item)}</span>`).join('');
+    const tags = items.slice(0, 6).map((item) => `<span style="display:inline-block;margin:0 8px 8px 0;padding:6px 12px;border:1px solid #E5E7EB;border-radius:999px;background:#F8FAFC;font-size:14px;line-height:1.5;font-weight:500;color:#4B5563;">${formatInlineMarkdown(item)}</span>`).join('');
     return `<div style="margin-top:10px;">${tags}</div>`;
   };
 
   const renderEventCard = (event) => {
     const analysisText = event.analysis.join(' ').trim();
-    const actions = event.actions.slice(0, 5).map((a) => `<li style="margin:0 0 8px 0;color:#111827;font-size:16px;line-height:1.72;">${formatInlineMarkdown(a)}</li>`).join('');
+    const actions = event.actions.slice(0, 5).map((a) => `<li style="margin:0 0 8px 0;color:#111827;font-size:17px;line-height:1.78;">${formatInlineMarkdown(a)}</li>`).join('');
     return `
       <div style="margin:0 0 16px 0;padding:18px 20px;border:1px solid #E5E7EB;border-radius:12px;background:#FFFFFF;box-shadow:0 2px 8px rgba(17,24,39,0.05);">
-        <div style="font-size:13px;color:#6B7280;font-weight:600;letter-spacing:0.3px;margin-bottom:8px;">HOT EVENT ${event.index}</div>
+        <div style="font-size:14px;color:#4B5563;font-weight:700;letter-spacing:0.4px;margin-bottom:10px;">HOT EVENT ${event.index}</div>
         <div style="font-size:20px;line-height:1.45;color:#111827;font-weight:700;margin-bottom:10px;">${formatInlineMarkdown(event.title)}</div>
-        <div style="font-size:16px;line-height:1.75;color:#111827;margin-bottom:12px;"><span style="font-size:16px;font-weight:700;">热点解析：</span>${formatInlineMarkdown(analysisText || '今日核心动态持续演进，建议关注执行节奏与信号变化。')}</div>
+        <div style="font-size:17px;line-height:1.8;color:#111827;margin-bottom:12px;"><span style="font-size:16px;font-weight:700;">热点解析：</span>${formatInlineMarkdown(analysisText || '今日核心动态持续演进，建议关注执行节奏与信号变化。')}</div>
         ${actions ? `<div style="font-size:16px;font-weight:700;color:#111827;margin:0 0 6px 0;">相关动态：</div><ul style="margin:0;padding-left:20px;">${actions}</ul>` : ''}
         ${renderSourceTags(event.sources)}
       </div>
@@ -558,29 +566,24 @@ function markdownToStyledHtml(markdown) {
         </tr>
         <tr>
           <td style="padding:16px 24px 6px 24px;">
-            ${sectionTitle('Top 3 Hot Events')}
-            ${top3.length > 0 ? top3.map(renderEventCard).join('') : '<div style="font-size:14px;color:#4b5563;padding:12px 0;">今日暂无可用热点事件。</div>'}
+            ${renderSectionBlock('Key Section', 'Top 3 Hot Events', top3.length > 0 ? top3.map(renderEventCard).join('') : '<div style="font-size:16px;color:#4b5563;padding:12px 0;line-height:1.7;">今日暂无可用热点事件。</div>')}
           </td>
         </tr>
         <tr>
-          <td style="padding:10px 24px 10px 24px;">
-            ${sectionTitle('Secondary Topics')}
-            ${secondaryTopics.length > 0 ? secondaryTopics.map((topic, i) => renderSecondaryTopicGroup(topic, i)).join('') : '<div style=\"font-size:16px;color:#4B5563;line-height:1.7;\">今日中热度主题较少，建议持续观察明日信号。</div>'}
+          <td style="padding:0 24px 6px 24px;">
+            ${renderSectionBlock('Key Section', 'Secondary Topics', secondaryTopics.length > 0 ? secondaryTopics.map((topic, i) => renderSecondaryTopicGroup(topic, i)).join('') : '<div style="font-size:16px;color:#4B5563;line-height:1.7;">今日中热度主题较少，建议持续观察明日信号。</div>')}
           </td>
         </tr>
         <tr>
-          <td style="padding:10px 24px 10px 24px;">
-            <div style="border:1px solid #d1d5db;border-left:4px solid #111827;border-radius:8px;background:#f9fafb;padding:14px 14px 12px 14px;">
-              ${sectionTitle('Executive Summary')}
-              <div style="font-size:16px;line-height:1.75;color:#111827;">${formatInlineMarkdown(executiveSummary)}</div>
-            </div>
+          <td style="padding:0 24px 6px 24px;">
+            ${renderSectionBlock('Summary', 'Executive Summary', `<div style="border:1px solid #d1d5db;border-left:4px solid #111827;border-radius:8px;background:#f9fafb;padding:14px 14px 12px 14px;"><div style="font-size:17px;line-height:1.8;color:#111827;">${formatInlineMarkdown(executiveSummary)}</div></div>`)}
           </td>
         </tr>
-        ${appendixLines.length > 0 ? `<tr><td style="padding:8px 24px 10px 24px;"><div style="border-top:1px solid #e5e7eb;padding-top:10px;">${sectionTitle('TOP20活跃人物')}<div style="font-size:12px;color:#6b7280;line-height:1.65;">${appendixLines.map((n) => `<div style="margin:0 0 4px 0;">${formatInlineMarkdown(n)}</div>`).join('')}</div></div></td></tr>` : ''}
-        ${topSectionNotes.length > 0 ? `<tr><td style="padding:6px 24px 12px 24px;"><div style="font-size:13px;color:#6b7280;line-height:1.65;">${topSectionNotes.map((n) => `<div style="margin:0 0 5px 0;">${formatInlineMarkdown(n)}</div>`).join('')}</div></td></tr>` : ''}
+        ${appendixLines.length > 0 ? `<tr><td style="padding:0 24px 6px 24px;">${renderSectionBlock('Ranking', 'TOP20活跃人物', `<div style="font-size:15px;color:#4b5563;line-height:1.75;">${appendixLines.map((n) => `<div style="margin:0 0 6px 0;">${formatInlineMarkdown(n)}</div>`).join('')}</div>`)}</td></tr>` : ''}
+        ${topSectionNotes.length > 0 ? `<tr><td style="padding:0 24px 12px 24px;"><div style="border:1px solid #E5E7EB;border-radius:12px;background:#FFFFFF;padding:12px 14px;"><div style="font-size:14px;color:#4b5563;line-height:1.7;">${topSectionNotes.map((n) => `<div style="margin:0 0 6px 0;">${formatInlineMarkdown(n)}</div>`).join('')}</div></div></td></tr>` : ''}
         <tr>
           <td style="padding:10px 24px 20px 24px;border-top:1px solid #e5e7eb;">
-            <div style="font-size:12px;color:#9ca3af;line-height:1.6;">This brief is generated for management quick-read. Source links are embedded in each event card for direct verification and follow-up.</div>
+            <div style="font-size:13px;color:#6b7280;line-height:1.65;">This brief is generated for management quick-read. Source links are embedded in each event card for direct verification and follow-up.</div>
           </td>
         </tr>
       </table>
