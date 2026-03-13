@@ -88,6 +88,7 @@ function parsePeopleRoster(raw) {
             handle: normalizeHandle(
               row?.item || row?.handle || row?.username || row?.account || row?.twitter || row?.x || row?.id,
             ),
+            title: String(row?.title || row?.role || row?.position || '').trim(),
             description: String(row?.description || row?.desc || row?.bio || row?.note || '').trim(),
           };
         })
@@ -104,7 +105,7 @@ function parsePeopleRoster(raw) {
         ? line.split(',').map((v) => v.trim())
         : line.split(/\s+/).map((v) => v.trim());
       const [name, itemOrHandle] = parts;
-      return { name: name || itemOrHandle, handle: normalizeHandle(itemOrHandle || name), description: '' };
+      return { name: name || itemOrHandle, handle: normalizeHandle(itemOrHandle || name), title: '', description: '' };
     })
     .filter((r) => r.handle);
 }
@@ -234,11 +235,14 @@ function rankPeople(items, roster) {
     if (!handle) continue;
     counts.set(handle, (counts.get(handle) || 0) + 1);
   }
+  return '其他AI动态';
+}
 
-  const meta = new Map(roster.map((r) => [normalizeHandle(r.handle), { name: r.name || r.handle, description: r.description || '' }]));
+  const meta = new Map(roster.map((r) => [normalizeHandle(r.handle), { name: r.name || r.handle, title: r.title || '', description: r.description || '' }]));
   return Array.from(counts.entries())
     .map(([handle, outputCount]) => ({
       name: (meta.get(handle)?.name) || handle,
+      title: (meta.get(handle)?.title) || '',
       description: (meta.get(handle)?.description) || '',
       handle,
       outputCount,
@@ -266,6 +270,19 @@ async function writeWeeklyCountsTable(ranking) {
 }
 
 
+function getDailyPeopleStats(items) {
+  const stats = new Map();
+  for (const item of items) {
+    const handle = normalizeHandle(extractHandleFromItem(item));
+    if (!handle) continue;
+    if (!stats.has(handle)) stats.set(handle, { actionCount: 0, hotspots: new Set() });
+    const entry = stats.get(handle);
+    entry.actionCount += 1;
+    entry.hotspots.add(classifyHotspot(extractTextFromItem(item)));
+  }
+  return stats;
+}
+
 const PEOPLE_PROFILE_MAP = {
   elonmusk: { title: 'xAI创始人', bio: 'AI与算力叙事核心人物' },
   sama: { title: 'OpenAI联合创始人', bio: 'OpenAI产品与战略核心' },
@@ -287,18 +304,22 @@ const PEOPLE_PROFILE_MAP = {
   billgates: { title: '微软联合创始人', bio: '长期科技趋势观察者' },
 };
 
-function appendTop20Appendix(markdown, top20) {
+function appendTop20Appendix(markdown, top20, peopleStats) {
   const rows = top20
-    .map((p, i) => {
+    .map((p) => {
       const profile = PEOPLE_PROFILE_MAP[normalizeHandle(p.handle)] || {};
-      const title = profile.title || p.title || 'AI从业者';
-      const bio = profile.bio || p.description || '持续活跃于AI一线动态';
-      return `${i + 1}. ${p.name}（@${p.handle}）｜${title}：${bio}`;
+      const title = p.title || profile.title || 'AI从业者';
+      const bio = p.description || profile.bio || '持续活跃于AI一线动态';
+      const stat = peopleStats?.get(normalizeHandle(p.handle));
+      const actionCount = stat?.actionCount || 0;
+      const hotspotCount = stat?.hotspots?.size || 0;
+      return `${p.name}（@${p.handle}）| ${title}：${bio} | 今日action数量：${actionCount}，涉及到${hotspotCount}个热点`;
     })
     .join('\n');
 
   return `${markdown.trim()}\n\n## TOP20活跃人物\n\n${rows}\n`;
 }
+
 
 function relabelSourceLinksWithRealNames(markdown, people) {
   const map = new Map((people || []).map((p) => [normalizeHandle(p.handle), p.name || p.handle]));
@@ -597,7 +618,7 @@ async function runApify(input) {
   return { items, runData: { id: normalizeActorId(actorId), status: 'SUCCEEDED' }, datasetId: 'run-sync-output' };
 }
 
-async function generateReport(items, top20, stats) {
+async function generateReport(items, top20, stats, peopleStats) {
   if (!Array.isArray(items) || items.length === 0) {
     return `# AI Pulse - X Daily Brief\n\n今日无可用AI相关内容。\n`;
   }
@@ -610,7 +631,7 @@ async function generateReport(items, top20, stats) {
   const markdown = await requestOpenAIReport({ apiKey, model, prompt });
   const normalized = normalizeMarkdownLayout(markdown);
   const withRealNameLinks = relabelSourceLinksWithRealNames(normalized, top20);
-  return appendTop20Appendix(withRealNameLinks, top20);
+  return appendTop20Appendix(withRealNameLinks, top20, peopleStats);
 }
 
 async function sendEmail(reportMarkdown) {
@@ -678,8 +699,9 @@ async function main() {
   const aiRelatedDaily = daily.items.filter(isAiRelatedItem);
   console.log(`Daily items: ${daily.items.length}, AI-related: ${aiRelatedDaily.length}`);
   const hotspotStats = getHotspotStats(aiRelatedDaily);
+  const dailyPeopleStats = getDailyPeopleStats(aiRelatedDaily);
 
-  const report = await generateReport(aiRelatedDaily, top20, hotspotStats);
+  const report = await generateReport(aiRelatedDaily, top20, hotspotStats, dailyPeopleStats);
   await fs.writeFile('artifacts/daily-report.md', report, 'utf8');
 
   await sendEmail(report);

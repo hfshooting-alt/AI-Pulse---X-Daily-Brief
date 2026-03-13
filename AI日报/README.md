@@ -48,12 +48,13 @@ View your app in AI Studio: https://ai.studio/apps/641843a5-ce53-4d86-aa3d-2aab4
 - 采集逻辑：先按“近7天、最多1000条”拉全量输出并保存 `artifacts/all-outputs.json`，再按输出量排名取TOP20用于“近1天”日报生成。
 - 每人近7天动态数表格会写入 `AI日报/artifacts/ai-weekly-output-counts.md` 与 `AI日报/artifacts/ai-weekly-output-counts.csv`，并随 workflow artifact 一起下载。
 - 日报末尾会自动追加附录，列出TOP20人物的真名、账号与输出数量。
+- `TOP20活跃人物` 行格式为：`真名（@用户名）| 职位：一句话介绍 | 今日action数量：X，涉及到Y个热点`（X/Y基于第二次日内抓取与热点归类统计）。
 
 - 日报主标题统一为 `AI Pulse - X Daily Brief`。
 - 来源链接文案统一为 `@本名` 超链接（不再使用“查看原帖”与X用户名显示）。
 - 事件结构统一为“热点解析 + 相关动态”。
 
-- 附录标题统一为 `TOP20活跃人物`，每位人物包含：本名、账号、输出数量、一句话描述（来自人物库 description/desc/bio 字段）。
+- 附录标题统一为 `TOP20活跃人物`，每位人物包含：本名、账号、职位、一句话介绍、今日action数量、涉及热点数量。
 
 - 正文末尾新增 `Today's Summary`（面向高管），按“关键结论/重要原因/业务影响”结构化输出，限制在200字内。
 - 附录新增“每日Action数量”和“每日涉及热点数量”，并给出热点概览排序。
