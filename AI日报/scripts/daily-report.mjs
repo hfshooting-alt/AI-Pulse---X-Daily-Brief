@@ -431,18 +431,22 @@ function markdownToStyledHtml(markdown) {
     }
 
     if (currentEvent) {
-      const normalized = line.replace(/^[○■*-]\s+/, '');
-      if (/热点解析[:：]/.test(normalized)) {
-        currentEvent.analysis.push(normalized.replace(/^热点解析[:：]\s*/, ''));
-      } else if (/why it matters|管理层意义|业务影响|重要性/i.test(normalized)) {
-        currentEvent.why = normalized.replace(/^([^:：]+)[:：]\s*/, '');
-      } else if (/相关动态[:：]/.test(normalized)) {
-        const value = normalized.replace(/^相关动态[:：]\s*/, '');
+      const normalized = line.replace(/^[○■*-]\s+/, '').trim();
+      const plain = normalized.replace(/\*\*/g, '').trim();
+
+      if (/热点解析[:：]/.test(plain)) {
+        const value = plain.replace(/^热点解析[:：]\s*/, '').trim();
+        if (value) currentEvent.analysis.push(value);
+      } else if (/why it matters|管理层意义|业务影响|重要性/i.test(plain)) {
+        const value = plain.replace(/^([^:：]+)[:：]\s*/, '').trim();
+        if (value) currentEvent.why = value;
+      } else if (/相关动态[:：]/.test(plain)) {
+        const value = plain.replace(/^相关动态[:：]\s*/, '').trim();
         if (value) currentEvent.actions.push(value);
-      } else if (/^@/.test(normalized) || /https?:\/\//.test(normalized)) {
-        currentEvent.sources.push(normalized);
-      } else {
-        currentEvent.actions.push(normalized);
+      } else if (/^@/.test(plain) || /https?:\/\//.test(plain)) {
+        currentEvent.sources.push(plain);
+      } else if (plain) {
+        currentEvent.actions.push(plain);
       }
     } else if (!/^##\s+/.test(line)) {
       topSectionNotes.push(line.replace(/^[○■*-]\s+/, ''));
