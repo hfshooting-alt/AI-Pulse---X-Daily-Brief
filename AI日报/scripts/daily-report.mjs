@@ -263,6 +263,31 @@ async function writeWeeklyCountsTable(ranking) {
   const artifactMarkdownPath = `${artifactsDir}/ai-weekly-output-counts.md`;
   const artifactCsvPath = `${artifactsDir}/ai-weekly-output-counts.csv`;
 
+  const meta = new Map(roster.map((r) => [normalizeHandle(r.handle), { name: r.name || r.handle, title: r.title || '', description: r.description || '' }]));
+  return Array.from(counts.entries())
+    .map(([handle, outputCount]) => ({
+      name: (meta.get(handle)?.name) || handle,
+      title: (meta.get(handle)?.title) || '',
+      description: (meta.get(handle)?.description) || '',
+      handle,
+      outputCount,
+    }))
+    .sort((a, b) => b.outputCount - a.outputCount);
+}
+
+async function writeWeeklyCountsTable(ranking) {
+  const header = '| 排名 | 本名 | X账号 | 近一周动态数量 |\n|---:|---|---|---:|';
+  const rows = ranking.map((p, i) => `| ${i + 1} | ${p.name} | @${p.handle} | ${p.outputCount} |`);
+  const markdown = `${header}\n${rows.join('\n')}\n`;
+  const csvHeader = 'rank,name,handle,weekly_output_count';
+  const csvRows = ranking.map((p, i) => `${i + 1},"${String(p.name).replaceAll('"', '""')}",${p.handle},${p.outputCount}`);
+  const csv = `${csvHeader}\n${csvRows.join('\n')}\n`;
+
+  const artifactsDir = 'artifacts';
+  await fs.mkdir(artifactsDir, { recursive: true });
+  const artifactMarkdownPath = `${artifactsDir}/ai-weekly-output-counts.md`;
+  const artifactCsvPath = `${artifactsDir}/ai-weekly-output-counts.csv`;
+
   await fs.writeFile(artifactMarkdownPath, markdown, 'utf8');
   await fs.writeFile(artifactCsvPath, csv, 'utf8');
 
@@ -459,15 +484,18 @@ function markdownToStyledHtml(markdown) {
         const value = plain.replace(/^热点解析[:：]\s*/, '').trim();
         if (value) currentEvent.analysis.push(value);
       } else if (/why it matters|管理层意义|业务影响|重要性/i.test(plain)) {
-        const value = plain.replace(/^([^:：]+)[:：]\s*/, '').trim();
-        if (value) currentEvent.why = value;
+        // explicitly ignore this block per report style requirement
       } else if (/相关动态[:：]/.test(plain)) {
         const value = plain.replace(/^相关动态[:：]\s*/, '').trim();
         if (value) currentEvent.actions.push(value);
       } else if (/^@/.test(plain) || /https?:\/\//.test(plain)) {
         currentEvent.sources.push(plain);
       } else if (plain) {
-        currentEvent.actions.push(plain);
+        const isNoise = /^(---+|___+|\*\*\*+)$/.test(plain)
+          || /^#{1,6}\s+/.test(plain)
+          || /^相关动态[:：]?$/.test(plain)
+          || /^热点解析[:：]?$/.test(plain);
+        if (!isNoise) currentEvent.actions.push(plain);
       }
     } else if (!/^##\s+/.test(line)) {
       topSectionNotes.push(line.replace(/^[○■*-]\s+/, ''));
@@ -512,7 +540,6 @@ function markdownToStyledHtml(markdown) {
         <div style="font-size:12px;color:#6b7280;font-weight:600;letter-spacing:0.3px;margin-bottom:6px;">HOT EVENT ${event.index}</div>
         <div style="font-size:19px;line-height:1.45;color:#111827;font-weight:700;margin-bottom:10px;">${formatInlineMarkdown(event.title)}</div>
         <div style="font-size:14px;line-height:1.7;color:#1f2937;margin-bottom:10px;">${formatInlineMarkdown(analysisText || '今日核心动态持续演进，建议关注执行节奏与信号变化。')}</div>
-        <div style="margin:0 0 10px 0;padding:10px 12px;background:#f9fafb;border-left:3px solid #111827;font-size:13px;line-height:1.65;color:#111827;"><strong>Why it matters:</strong> ${formatInlineMarkdown(event.why || '对业务节奏、资源配置与外部竞争态势有直接影响。')}</div>
         ${actions ? `<ul style="margin:0;padding-left:18px;">${actions}</ul>` : ''}
         ${renderSourceTags(event.sources)}
       </div>
