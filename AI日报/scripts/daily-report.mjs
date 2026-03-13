@@ -1,9 +1,9 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import nodemailer from 'nodemailer';
 
 const requiredEnv = [
   'APIFY_TOKEN',
-  'APIFY_ACTOR_ID',
   'OPENAI_API_KEY',
   'OPENAI_MODEL',
   'SMTP_HOST',
