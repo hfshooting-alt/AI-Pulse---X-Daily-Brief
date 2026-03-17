@@ -278,6 +278,22 @@ function getItemThreadKey(item) {
   return text ? text.slice(0, 80) : 'unknown-thread';
 }
 
+function buildPromptItems(items) {
+  const deduped = new Map();
+
+  for (const item of items) {
+    const label = classifyHotspot(extractTextFromItem(item));
+    const handle = normalizeHandle(extractHandleFromItem(item)) || 'unknown';
+    const threadKey = getItemThreadKey(item);
+    const key = `${label}::${handle}::${threadKey}`;
+
+    if (!deduped.has(key)) deduped.set(key, item);
+  }
+
+  return Array.from(deduped.values());
+}
+
+
 const rankPeople = (items, roster) => {
   const counts = items.reduce((map, item) => {
     const handle = extractHandleFromItem(item);
@@ -650,10 +666,10 @@ function getPromptTemplate() {
 # AI Pulse - X Daily Brief
 
 输出要求：
-1) 先输出TOP3热度事件（优先按参与人数 participantCount 排序，再参考互动簇 interactionGroupCount 和总输出量 count）
+1) 先输出TOP3热度事件（严格按参与人数 participantCount 优先排序；仅在相同人数时参考 interactionGroupCount 与 count）
 2) 再输出7-12条中热度事件，按2-4个Topic组织（Topic标题不要出现“聚类”二字）
 3) 不需要按传统行业大类分类
-4) 每个事件统一结构：\n   - ○ **热点解析：** [事件抽象总结]\n   - ○ **相关动态：** [参与者动态，分点列出]\n5) 不要输出“聚类一/二/三”字样；不要输出“额外观察”与“AI大厂与投资机构资讯”板块\n6) 关联动态中的来源链接，不使用“查看原帖”，统一写成 [@本名](url)（本名不是X用户名）\n7) 文末新增 Today's Summary 板块，用一个自然段完成（不分点，不超过200字）\n8) 输出Markdown，结构清晰，分级列表明确
+4) 每个事件统一结构：\n   - ○ **热点解析：** [事件抽象总结]\n   - ○ **相关动态：** [参与者动态，分点列出，且同一事件内每个账号最多出现1次]\n5) 不要输出“聚类一/二/三”字样；不要输出“额外观察”与“AI大厂与投资机构资讯”板块\n6) 关联动态中的来源链接，不使用“查看原帖”，统一写成 [@本名](url)（本名不是X用户名）\n7) 文末新增 Today's Summary 板块，用一个自然段完成（不分点，不超过200字）\n8) 输出Markdown，结构清晰，分级列表明确
 `;
 }
 
@@ -691,7 +707,8 @@ async function generateReport(items, top20, stats, peopleStats) {
   const model = requireEnv('OPENAI_MODEL');
   console.log(`Using OPENAI_MODEL=${model}`);
 
-  const prompt = `${getPromptTemplate()}\n\n统计如下：\n${JSON.stringify(stats, null, 2)}\n\n数据如下：\n${JSON.stringify(items, null, 2)}`;
+  const promptItems = buildPromptItems(items);
+  const prompt = `${getPromptTemplate()}\n\n统计如下（用于事件重要性排序，核心看participantCount）：\n${JSON.stringify(stats, null, 2)}\n\n去重后的参与样本（同话题-同人-同线程仅保留1条）：\n${JSON.stringify(promptItems, null, 2)}`;
   const markdown = await requestOpenAIReport({ apiKey, model, prompt });
   const normalized = normalizeMarkdownLayout(markdown);
   const withRealNameLinks = relabelSourceLinksWithRealNames(normalized, top20);
