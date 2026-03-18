@@ -802,8 +802,9 @@ async function runApifyBatched(templateInput, handles, since, until, { batchSize
     batches.push(handles.slice(i, i + batchSize));
   }
 
+  console.log(`Splitting ${handles.length} handles into ${batches.length} batches (size=${batchSize}, concurrency=${concurrency})`);
   const allItems = [];
-  // Process batches with limited concurrency
+  // Process ALL batches with limited concurrency (not capped at concurrency total)
   for (let i = 0; i < batches.length; i += concurrency) {
     const chunk = batches.slice(i, i + concurrency);
     const results = await Promise.all(
