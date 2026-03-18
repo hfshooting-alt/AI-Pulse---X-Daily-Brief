@@ -509,6 +509,12 @@ function relabelSourceLinksWithRealNames(markdown, people) {
 function normalizeMarkdownLayout(markdown) {
   let text = String(markdown || '').replace(/\r\n/g, '\n').trim();
   text = text.replace(/^\s*\*\s*$/gm, '');
+  // Convert indented numbered items to dash items EARLY (before the newline-insertion
+  // regex below strips their indentation).  The /m flag makes ^ match each line start.
+  // Use [^\S\n]+ (non-newline whitespace) so that \s doesn't eat a \n and accidentally
+  // match top-level items preceded by a blank line.
+  text = text.replace(/^([^\S\n]+)\d+\.\s+/gm, '$1- ');
+
   text = text.replace(/([^\n])\s+(#{1,6}\s)/g, '$1\n\n$2');
   text = text.replace(/([^\n])\s+(\d+\.\s+)/g, '$1\n\n$2');
   text = text.replace(/\*\*事件：\*\*/g, '\n○ **热点解析：**');
@@ -548,12 +554,64 @@ function normalizeMarkdownLayout(markdown) {
 
   text = cleaned.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 
+  // Remove 动态 entries (dash-prefixed lines under 相关动态) that have no source link
+  text = stripSourcelessDynamic(text);
+
   if (!/##\s*Today's Summary/i.test(text)) {
     console.warn('Warning: OpenAI output missing "Today\'s Summary" section, appending generic fallback.');
     text += "\n\n## Today's Summary\n\n今日高热度集中在AI能力落地与产品化推进，头部公司密集发布与资本动作叠加放大了市场关注，建议管理层优先布局组织级部署、成本治理与执行效率。";
   }
 
   return `${text}\n`;
+}
+
+/**
+ * Remove 相关动态 entries that have no source link ([@...](url)).
+ * These are entries that the LLM generated without attributing a source,
+ * which violates the output format requirement.
+ */
+function stripSourcelessDynamic(text) {
+  const lines = text.split('\n');
+  const result = [];
+  let inDynamicBlock = false;
+  let strippedCount = 0;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // Detect start of 相关动态 block
+    if (/\*\*相关动态[：:]?\*\*/.test(trimmed)) {
+      inDynamicBlock = true;
+      result.push(line);
+      continue;
+    }
+
+    // If we're in a dynamic block and hit a dash-prefixed line, check for source
+    if (inDynamicBlock && /^[-•*]\s+/.test(trimmed)) {
+      // Check if this line contains a source link pattern [@...](url)
+      if (/\[@[^\]]+\]\(https?:\/\/[^)]+\)/.test(trimmed)) {
+        result.push(line);
+      } else {
+        strippedCount += 1;
+        // skip this line — no source
+      }
+      continue;
+    }
+
+    // If we hit a non-dash, non-empty line while in dynamic block, leave the block
+    if (inDynamicBlock && trimmed !== '' && !/^[-•*]\s+/.test(trimmed)) {
+      inDynamicBlock = false;
+    }
+
+    result.push(line);
+  }
+
+  if (strippedCount > 0) {
+    console.warn(`stripSourcelessDynamic: removed ${strippedCount} 动态 entries without source links`);
+  }
+
+  return result.join('\n');
 }
 
 function escapeHtml(value) {
@@ -736,7 +794,7 @@ function markdownToStyledHtml(markdown) {
   const top3 = [];
   const secondary = [];
   for (const evt of events) {
-    if (top3.length < 3 && /top\s*3|热度事件/i.test(evt.sectionTitle || '')) {
+    if (top3.length < 3 && /top\s*3|(?<!中)热度事件/i.test(evt.sectionTitle || '')) {
       top3.push(evt);
     } else {
       secondary.push(evt);
@@ -872,7 +930,8 @@ function getPromptTemplate() {
 ## 输出格式（严格遵守）
 
 ### TOP3热度事件
-用 ## 标题 + 编号列表输出，严格按 participantCount 排序（数据中已排好序）：
+用 ## 标题 + 编号列表输出，严格按 participantCount 排序（数据中已排好序）。
+**每条TOP3事件至少包含3条相关动态，每条动态必须有来源链接。**
 
 \`\`\`
 ## TOP3 热度事件
@@ -882,17 +941,28 @@ function getPromptTemplate() {
    - **相关动态：**
      - [@本名](url): 动态描述…
      - [@本名](url): 动态描述…
+     - [@本名](url): 动态描述…
 
 2. 事件标题B
-   …
+   - **热点解析：** …
+   - **相关动态：**
+     - [@本名](url): 动态描述…
+     - [@本名](url): 动态描述…
+     - [@本名](url): 动态描述…
 
 3. 事件标题C
-   …
+   - **热点解析：** …
+   - **相关动态：**
+     - [@本名](url): 动态描述…
+     - [@本名](url): 动态描述…
+     - [@本名](url): 动态描述…
 \`\`\`
 
 ### 中热度事件
 用 ### 作为Topic标题，每个Topic下用编号列表输出事件，共输出7-12条事件，分成2-4个Topic。
-**每个Topic内的事件也必须严格按 participantCount 从高到低排列**（数据中已按此顺序排好）：
+**跨Topic排列规则：participantCount 最高的事件必须出现在最前面的Topic中。如果一个Topic包含的事件平均participantCount明显更高，该Topic应排在前面。**
+**每个Topic内的事件也必须严格按 participantCount 从高到低排列**（数据中已按此顺序排好）。
+**每个Topic至少包含2条事件，每条事件至少包含2条相关动态。**
 
 \`\`\`
 ## 中热度话题
@@ -902,13 +972,20 @@ function getPromptTemplate() {
    - **热点解析：** …
    - **相关动态：**
      - [@本名](url): 动态描述…
+     - [@本名](url): 动态描述…
 
 2. 事件标题Y
-   …
+   - **热点解析：** …
+   - **相关动态：**
+     - [@本名](url): 动态描述…
+     - [@本名](url): 动态描述…
 
 ### Topic标题B
 1. 事件标题Z
-   …
+   - **热点解析：** …
+   - **相关动态：**
+     - [@本名](url): 动态描述…
+     - [@本名](url): 动态描述…
 \`\`\`
 
 ### 通用规则
@@ -916,6 +993,8 @@ function getPromptTemplate() {
 - **关键约束：同一事件内，每个账号（@handle）最多只能出现1次。** 数据已按每人每话题去重，每条数据代表一个不同的人的观点，请全部使用，不要重复引用同一人
 - 不要输出”聚类一/二/三”字样；不要输出”额外观察”与”AI大厂与投资机构资讯”板块
 - 关联动态中的来源链接，不使用”查看原帖”，统一写成 [@本名](url)（本名不是X用户名）
+- **【强制】每条”相关动态”都必须包含来源链接 [@本名](url)，没有来源链接的动态不要输出。每条动态的格式必须是：`- [@本名](url): 描述文字…`，冒号前面是来源链接，冒号后面是描述。**
+- **每条事件的”相关动态”至少2条，尽量3条以上。如果某事件只有1个来源，则将该事件合并到相关事件中，不要单独列出。**
 - 文末新增 Today's Summary 板块，**必须用 ## Today's Summary 作为独立的二级标题**，内容用一个自然段完成（不分点，不超过200字）；**不得将 Today's Summary 作为编号列表中的一项**
 - 输出Markdown，结构清晰，分级列表明确
 `;
@@ -1006,18 +1085,31 @@ async function generateReport(items, top20, stats, peopleStats) {
   console.log(`Using GEMINI_MODEL=${model}`);
 
   const promptItems = buildPromptItems(items);
-  // Extract only the fields OpenAI needs to reduce token usage
+
+  // Build a participantCount lookup from stats for each topic label
+  const topicParticipantMap = new Map();
+  if (stats?.hotspots) {
+    for (const hs of stats.hotspots) {
+      topicParticipantMap.set(hs.label, hs.participantCount);
+    }
+  }
+
+  // Extract only the fields Gemini needs to reduce token usage
   const compactItems = promptItems.map((item) => {
     const handle = extractHandleFromItem(item);
     const text = extractTextFromItem(item);
     const url = item?.url || item?.tweetUrl || item?.link || '';
     const createdAt = item?.createdAt || item?.created_at || item?.date || '';
-    const compact = { handle, text: text.slice(0, 500) };
+    const primaryTopic = classifyHotspots(text)[0] || '其他AI动态';
+    const compact = { handle, text: text.slice(0, 500), topic: primaryTopic };
     if (url) compact.url = url;
     if (createdAt) compact.date = typeof createdAt === 'string' ? createdAt.slice(0, 19) : createdAt;
+    // Attach participantCount so LLM can verify sorting
+    const pc = topicParticipantMap.get(primaryTopic);
+    if (pc != null) compact.topicParticipantCount = pc;
     return compact;
   });
-  const prompt = `${getPromptTemplate()}\n\n话题统计（已按participantCount降序排列，participants列出每个话题的唯一参与者）：\n${JSON.stringify(stats, null, 2)}\n\n去重后的参与样本（每人每话题仅保留1条最具代表性的内容，共${compactItems.length}条）：\n${JSON.stringify(compactItems, null, 2)}`;
+  const prompt = `${getPromptTemplate()}\n\n话题统计（已按participantCount降序排列，participants列出每个话题的唯一参与者）：\n${JSON.stringify(stats, null, 2)}\n\n去重后的参与样本（每人每话题仅保留1条最具代表性的内容，共${compactItems.length}条）。每条包含 topic（所属话题分类）和 topicParticipantCount（该话题参与人数），请据此排序：\n${JSON.stringify(compactItems, null, 2)}`;
   const markdown = await requestGeminiReport({ apiKey, model, prompt });
   const normalized = normalizeMarkdownLayout(markdown);
   const withRealNameLinks = relabelSourceLinksWithRealNames(normalized, top20);
