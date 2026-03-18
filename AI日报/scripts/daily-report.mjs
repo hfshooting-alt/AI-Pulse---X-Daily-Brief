@@ -302,6 +302,7 @@ const getHotspotStats = (items) => {
     .map(([label, entry]) => ({
       label,
       participantCount: entry.participants.size,
+      participants: Array.from(entry.participants),
       interactionGroupCount: entry.interactionGroups.size,
       count: entry.rawCount,
     }))
@@ -347,19 +348,35 @@ function getItemThreadKey(item) {
 }
 
 function buildPromptItems(items) {
-  const deduped = new Map();
+  // Two-pass dedup:
+  // 1. Per handle+thread (original dedup for multi-label items)
+  // 2. Per handle+topic — keep only the longest/most informative item per person per topic
+  //    so that one person posting 5 threads about the same topic only appears once
 
+  // Pass 1: thread-level dedup
+  const threadDeduped = new Map();
   for (const item of items) {
     const handle = normalizeHandle(extractHandleFromItem(item)) || 'unknown';
     const threadKey = getItemThreadKey(item);
-    // Deduplicate by person + thread regardless of label, since multi-label
-    // items would otherwise appear multiple times in the prompt
     const key = `${handle}::${threadKey}`;
-
-    if (!deduped.has(key)) deduped.set(key, item);
+    if (!threadDeduped.has(key)) threadDeduped.set(key, item);
   }
 
-  return Array.from(deduped.values());
+  // Pass 2: per person + topic dedup — keep the item with the longest text
+  const topicDeduped = new Map();
+  for (const item of threadDeduped.values()) {
+    const handle = normalizeHandle(extractHandleFromItem(item)) || 'unknown';
+    const text = extractTextFromItem(item);
+    const labels = classifyHotspots(text);
+    const primaryLabel = labels[0] || 'other';
+    const key = `${handle}::${primaryLabel}`;
+
+    if (!topicDeduped.has(key) || text.length > extractTextFromItem(topicDeduped.get(key)).length) {
+      topicDeduped.set(key, item);
+    }
+  }
+
+  return Array.from(topicDeduped.values());
 }
 
 
@@ -752,11 +769,24 @@ function getPromptTemplate() {
 
 # AI Pulse - X Daily Brief
 
-输出要求：
-1) 先输出TOP3热度事件（严格按参与人数 participantCount 优先排序；仅在相同人数时参考 interactionGroupCount 与 count）
-2) 再输出7-12条中热度事件，按2-4个Topic组织（Topic标题不要出现“聚类”二字）
+## 排名核心规则（必须遵守）
+- **热度排名唯一标准是”参与人数”（participantCount）**，即有多少个不同的人讨论了这个话题
+- 同一个人发多条推文/引用/回复，只算1个参与者
+- 统计数据中的 participants 数组列出了每个话题的所有唯一参与者，请严格按此排序
+- 仅在参与人数完全相同时，再参考 interactionGroupCount 和 count
+
+## 输出要求
+1) 先输出TOP3热度事件（严格按 participantCount 排序，数据中已按此排好序）
+2) 再输出7-12条中热度事件，按2-4个Topic组织（Topic标题不要出现”聚类”二字）
 3) 不需要按传统行业大类分类
-4) 每个事件统一结构：\n   - ○ **热点解析：** [事件抽象总结]\n   - ○ **相关动态：** [参与者动态，分点列出，且同一事件内每个账号最多出现1次]\n5) 不要输出“聚类一/二/三”字样；不要输出“额外观察”与“AI大厂与投资机构资讯”板块\n6) 关联动态中的来源链接，不使用“查看原帖”，统一写成 [@本名](url)（本名不是X用户名）\n7) 文末新增 Today's Summary 板块，用一个自然段完成（不分点，不超过200字）\n8) 输出Markdown，结构清晰，分级列表明确
+4) 每个事件统一结构：
+   - ○ **热点解析：** [事件抽象总结]
+   - ○ **相关动态：** [参与者动态，分点列出]
+5) **关键约束：同一事件内，每个账号（@handle）最多只能出现1次。** 数据已按每人每话题去重，每条数据代表一个不同的人的观点，请全部使用，不要重复引用同一人
+6) 不要输出”聚类一/二/三”字样；不要输出”额外观察”与”AI大厂与投资机构资讯”板块
+7) 关联动态中的来源链接，不使用”查看原帖”，统一写成 [@本名](url)（本名不是X用户名）
+8) 文末新增 Today's Summary 板块，用一个自然段完成（不分点，不超过200字）
+9) 输出Markdown，结构清晰，分级列表明确
 `;
 }
 
@@ -849,7 +879,7 @@ async function generateReport(items, top20, stats, peopleStats) {
     if (createdAt) compact.date = typeof createdAt === 'string' ? createdAt.slice(0, 19) : createdAt;
     return compact;
   });
-  const prompt = `${getPromptTemplate()}\n\n统计如下（用于事件重要性排序，核心看participantCount）：\n${JSON.stringify(stats, null, 2)}\n\n去重后的参与样本（同话题-同人-同线程仅保留1条，共${compactItems.length}条）：\n${JSON.stringify(compactItems, null, 2)}`;
+  const prompt = `${getPromptTemplate()}\n\n话题统计（已按participantCount降序排列，participants列出每个话题的唯一参与者）：\n${JSON.stringify(stats, null, 2)}\n\n去重后的参与样本（每人每话题仅保留1条最具代表性的内容，共${compactItems.length}条）：\n${JSON.stringify(compactItems, null, 2)}`;
   const markdown = await requestOpenAIReport({ apiKey, model, prompt });
   const normalized = normalizeMarkdownLayout(markdown);
   const withRealNameLinks = relabelSourceLinksWithRealNames(normalized, top20);
