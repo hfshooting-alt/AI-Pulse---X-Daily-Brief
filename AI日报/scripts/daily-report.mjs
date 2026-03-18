@@ -4,6 +4,7 @@ import nodemailer from 'nodemailer';
 
 const requiredEnv = [
   'APIFY_TOKEN',
+  'APIFY_ACTOR_ID',
   'OPENAI_API_KEY',
   'OPENAI_MODEL',
   'SMTP_HOST',
@@ -57,10 +58,12 @@ function maskSecret(value) {
 }
 
 function formatBjtDateDaysAgo(daysAgo) {
-  const now = new Date();
-  const bjtNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
-  const shifted = new Date(Date.UTC(bjtNow.getFullYear(), bjtNow.getMonth(), bjtNow.getDate() - daysAgo));
-  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-${String(shifted.getUTCDate()).padStart(2, '0')}`;
+  // BJT = UTC+8, use fixed offset instead of locale-dependent toLocaleString parsing
+  const nowUtcMs = Date.now();
+  const bjtMs = nowUtcMs + 8 * 60 * 60 * 1000;
+  const bjtDate = new Date(bjtMs);
+  bjtDate.setUTCDate(bjtDate.getUTCDate() - daysAgo);
+  return `${bjtDate.getUTCFullYear()}-${String(bjtDate.getUTCMonth() + 1).padStart(2, '0')}-${String(bjtDate.getUTCDate()).padStart(2, '0')}`;
 }
 
 function parseApifyInputTemplate(raw) {
@@ -72,7 +75,7 @@ function parseApifyInputTemplate(raw) {
 }
 
 function normalizeHandle(value) {
-  return String(value || '').trim().replace(/^@/, '');
+  return String(value || '').trim().replace(/^@/, '').toLowerCase();
 }
 
 function parsePeopleRoster(raw) {
@@ -136,11 +139,19 @@ async function fetchApifyDatasetItems({ token, actorId, input }) {
   runSyncUrl.searchParams.set('token', token);
   runSyncUrl.searchParams.set('clean', 'true');
 
-  const response = await fetch(runSyncUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input || {}),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10 * 60 * 1000); // 10 minutes
+  let response;
+  try {
+    response = await fetch(runSyncUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input || {}),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 
   const body = await response.text();
   if (!response.ok) throw new Error(`Apify run failed: ${response.status} ${body}`);
@@ -177,18 +188,25 @@ function extractHandleFromItem(item) {
 function extractTextFromItem(item) {
   return [item?.text, item?.fullText, item?.full_text, item?.tweetText, item?.title]
     .filter((v) => typeof v === 'string' && v.trim())
-    .join(' \n ')
-    .toLowerCase();
+    .join(' \n ');
 }
 
 function isAiRelatedItem(item) {
   const text = extractTextFromItem(item);
   if (!text) return false;
-  const kws = [
-    'ai', 'artificial intelligence', 'llm', 'model', 'agent', 'openai', 'anthropic', 'gpt', 'gemini', 'claude',
-    'nvidia', 'robot', 'inference', 'training', '人工智能', '大模型', '智能体', '推理', '算力', '芯片', '机器学习',
+
+  // Chinese keywords can use simple includes (no word-boundary issues)
+  const cnKws = ['人工智能', '大模型', '智能体', '推理', '算力', '芯片', '机器学习'];
+  if (cnKws.some((k) => text.includes(k))) return true;
+
+  // English keywords need word-boundary matching to avoid false positives
+  // e.g. "ai" must not match "again", "model" must not match "remodel"
+  const enKws = [
+    'ai', 'artificial intelligence', 'llm', 'model', 'agent', 'openai', 'anthropic',
+    'gpt', 'gemini', 'claude', 'nvidia', 'robot', 'inference', 'training',
+    'machine learning', 'deep learning', 'neural network',
   ];
-  return kws.some((k) => text.includes(k));
+  return enKws.some((k) => new RegExp(`\\b${k}\\b`, 'i').test(text));
 }
 
 function classifyHotspot(text) {
@@ -401,7 +419,7 @@ function relabelSourceLinksWithRealNames(markdown, people) {
     }
 
     const realName = map.get(handle);
-    return realName ? `[@${realName}](${url})` : `[@来源](${url})`;
+    return realName ? `[@${realName}](${url})` : handle ? `[@${handle}](${url})` : `[@来源](${url})`;
   });
 }
 
@@ -439,6 +457,7 @@ function normalizeMarkdownLayout(markdown) {
   text = cleaned.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 
   if (!/##\s*Today's Summary/i.test(text)) {
+    console.warn('Warning: OpenAI output missing "Today\'s Summary" section, appending generic fallback.');
     text += "\n\n## Today's Summary\n\n今日高热度集中在AI能力落地与产品化推进，头部公司密集发布与资本动作叠加放大了市场关注，建议管理层优先布局组织级部署、成本治理与执行效率。";
   }
 
@@ -674,11 +693,19 @@ function getPromptTemplate() {
 }
 
 async function requestOpenAIReport({ apiKey, model, prompt }) {
-  const response = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, input: prompt, temperature: Number(process.env.OPENAI_TEMPERATURE || 0.2) }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3 * 60 * 1000); // 3 minutes
+  let response;
+  try {
+    response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, input: prompt, temperature: Number(process.env.OPENAI_TEMPERATURE || 0.2) }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) throw new Error(`OpenAI request failed: ${response.status} ${await response.text()}`);
   const json = await response.json();
@@ -774,6 +801,9 @@ async function main() {
   const tablePaths = await writeWeeklyCountsTable(ranking);
   console.log(`Weekly output table saved: ${tablePaths.artifactMarkdownPath}, ${tablePaths.artifactCsvPath}`);
 
+  // NOTE: Twitter since/until uses UTC dates, but we generate BJT dates.
+  // This causes ~8h offset: some older tweets included, some recent ones missed.
+  // For better precision, filter by item.createdAt timestamp after fetching.
   const dailyInput = buildApifyInput(templateInput, top20.map((p) => p.handle), yesterday, today, 1000);
   if (top20.length > 0) console.log(`Example daily searchTerm: from:${top20[0].handle} since:${yesterday} until:${today}`);
   const daily = await runApify(dailyInput);
