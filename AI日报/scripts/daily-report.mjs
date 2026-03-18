@@ -611,6 +611,18 @@ function markdownToStyledHtml(markdown) {
       continue;
     }
 
+    // Detect ### sub-section headers (e.g. "### 开发工具与Agent工作流优化")
+    // OpenAI sometimes uses ### for mid-heat topic groups under a ## parent section
+    const h3Match = line.match(/^###\s+(.+)/);
+    if (h3Match) {
+      if (currentEvent) {
+        events.push(currentEvent);
+        currentEvent = null;
+      }
+      currentSectionTitle = h3Match[1].replace(/^[一二三四五六七八九十\d]+[、.．]\s*/, '').trim();
+      continue;
+    }
+
     const ordered = line.match(/^(\d+)\.\s+(.+)/);
     if (ordered) {
       if (currentEvent) events.push(currentEvent);
@@ -624,6 +636,29 @@ function markdownToStyledHtml(markdown) {
         sectionTitle: currentSectionTitle,
       };
       continue;
+    }
+
+    // If no current event but we have a section title and content, auto-create an
+    // implicit event so that un-numbered content under ### sections is captured
+    // instead of falling through to topSectionNotes.
+    if (!currentEvent && currentSectionTitle) {
+      const probe = line.replace(/^[○■*-]\s+/, '').replace(/\*\*/g, '').trim();
+      const isProbeNoise = !probe
+        || /^(---+|___+|\*\*\*+)$/.test(probe)
+        || /^#{1,6}\s+/.test(probe)
+        || /^相关动态[:：]?$/.test(probe)
+        || /^热点解析[:：]?$/.test(probe);
+      if (!isProbeNoise) {
+        currentEvent = {
+          index: events.length + 1,
+          title: currentSectionTitle,
+          analysis: [],
+          why: '',
+          actions: [],
+          sources: [],
+          sectionTitle: currentSectionTitle,
+        };
+      }
     }
 
     if (currentEvent) {
