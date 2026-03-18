@@ -5,8 +5,8 @@ import nodemailer from 'nodemailer';
 const requiredEnv = [
   'APIFY_TOKEN',
   'APIFY_ACTOR_ID',
-  'OPENAI_API_KEY',
-  'OPENAI_MODEL',
+  'GEMINI_API_KEY',
+  'GEMINI_MODEL',
   'SMTP_HOST',
   'SMTP_PORT',
   'SMTP_USER',
@@ -825,34 +825,41 @@ function getPromptTemplate() {
 `;
 }
 
-async function requestOpenAIReportOnce({ apiKey, model, prompt }) {
+async function requestGeminiReportOnce({ apiKey, model, prompt }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3 * 60 * 1000); // 3 minutes
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   let response;
   try {
-    response = await fetch('https://api.openai.com/v1/responses', {
+    response = await fetch(url, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, input: prompt, temperature: Number(process.env.OPENAI_TEMPERATURE || 0.2) }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: Number(process.env.GEMINI_TEMPERATURE || 0.2),
+          maxOutputTokens: 8192,
+        },
+      }),
       signal: controller.signal,
     });
   } finally {
     clearTimeout(timeout);
   }
 
-  if (!response.ok) throw new Error(`OpenAI request failed: ${response.status} ${await response.text()}`);
+  if (!response.ok) throw new Error(`Gemini request failed: ${response.status} ${await response.text()}`);
   const json = await response.json();
-  const text = [
-    json?.output_text,
-    ...(json?.output || []).flatMap((item) => (item?.content || []).map((c) => c?.text).filter((v) => typeof v === 'string')),
-  ].filter(Boolean).join('\n').trim();
+  const text = (json?.candidates || [])
+    .flatMap((c) => (c?.content?.parts || []).map((p) => p?.text).filter(Boolean))
+    .join('\n')
+    .trim();
 
-  if (!text) throw new Error('OpenAI returned empty textual output.');
+  if (!text) throw new Error('Gemini returned empty textual output.');
   return text;
 }
 
-async function requestOpenAIReport(params) {
-  return withRetry(() => requestOpenAIReportOnce(params), { label: 'OpenAI report', retries: 2, baseDelayMs: 5000 });
+async function requestGeminiReport(params) {
+  return withRetry(() => requestGeminiReportOnce(params), { label: 'Gemini report', retries: 2, baseDelayMs: 5000 });
 }
 
 async function runApify(input) {
@@ -898,9 +905,9 @@ async function generateReport(items, top20, stats, peopleStats) {
     return `# AI Pulse - X Daily Brief\n\n今日无可用AI相关内容。\n`;
   }
 
-  const apiKey = requireEnv('OPENAI_API_KEY');
-  const model = requireEnv('OPENAI_MODEL');
-  console.log(`Using OPENAI_MODEL=${model}`);
+  const apiKey = requireEnv('GEMINI_API_KEY');
+  const model = requireEnv('GEMINI_MODEL');
+  console.log(`Using GEMINI_MODEL=${model}`);
 
   const promptItems = buildPromptItems(items);
   // Extract only the fields OpenAI needs to reduce token usage
@@ -915,7 +922,7 @@ async function generateReport(items, top20, stats, peopleStats) {
     return compact;
   });
   const prompt = `${getPromptTemplate()}\n\n话题统计（已按participantCount降序排列，participants列出每个话题的唯一参与者）：\n${JSON.stringify(stats, null, 2)}\n\n去重后的参与样本（每人每话题仅保留1条最具代表性的内容，共${compactItems.length}条）：\n${JSON.stringify(compactItems, null, 2)}`;
-  const markdown = await requestOpenAIReport({ apiKey, model, prompt });
+  const markdown = await requestGeminiReport({ apiKey, model, prompt });
   const normalized = normalizeMarkdownLayout(markdown);
   const withRealNameLinks = relabelSourceLinksWithRealNames(normalized, top20);
   return appendTop20Appendix(withRealNameLinks, top20, peopleStats);
