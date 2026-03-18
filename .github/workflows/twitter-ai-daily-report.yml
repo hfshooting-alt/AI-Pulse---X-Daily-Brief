@@ -43,10 +43,9 @@ jobs:
           APIFY_ACTOR_INPUT_JSON: ${{ secrets.APIFY_ACTOR_INPUT_JSON }}
           APIFY_PEOPLE_JSON: ${{ secrets.APIFY_PEOPLE_JSON }}
 
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
-          OPENAI_TEMPERATURE: ${{ secrets.OPENAI_TEMPERATURE }}
-          OPENAI_INPUT_ITEMS: ${{ secrets.OPENAI_INPUT_ITEMS }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          GEMINI_TEMPERATURE: ${{ secrets.GEMINI_TEMPERATURE }}
           REPORT_PROMPT_TEMPLATE: ${{ secrets.REPORT_PROMPT_TEMPLATE }}
 
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
