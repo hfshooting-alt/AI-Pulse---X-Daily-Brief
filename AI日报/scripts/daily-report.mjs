@@ -631,10 +631,24 @@ function markdownToStyledHtml(markdown) {
     // Also match bold standalone titles like "**事件标题**" (LLM sometimes uses this instead of numbered lists)
     const boldTitle = !ordered && line.match(/^\*\*([^*]+)\*\*\s*$/);
     if (ordered || boldTitle) {
+      const candidateTitle = ordered ? ordered[2] : boldTitle[1];
+      // If this numbered item is actually "Today's Summary" / "今日总结", treat it as
+      // the start of the summary section rather than an event item.
+      if (/today'?s\s*summary|今日总结|executive\s*summary/i.test(candidateTitle)) {
+        if (currentEvent) { events.push(currentEvent); currentEvent = null; }
+        // Collect remaining lines as summary until end or next ## section
+        let k = contentLines.indexOf(line) + 1;
+        while (k < contentLines.length && !/^##\s+/.test(contentLines[k])) {
+          const sl = contentLines[k].replace(/^[○■*-]\s+/, '').trim();
+          if (sl) summaryLines.push(sl);
+          k++;
+        }
+        break; // stop main loop; everything after is summary/appendix
+      }
       if (currentEvent) events.push(currentEvent);
       currentEvent = {
         index: ordered ? Number(ordered[1]) : events.length + 1,
-        title: ordered ? ordered[2] : boldTitle[1],
+        title: candidateTitle,
         analysis: [],
         why: '',
         actions: [],
@@ -866,7 +880,7 @@ function getPromptTemplate() {
 - **关键约束：同一事件内，每个账号（@handle）最多只能出现1次。** 数据已按每人每话题去重，每条数据代表一个不同的人的观点，请全部使用，不要重复引用同一人
 - 不要输出”聚类一/二/三”字样；不要输出”额外观察”与”AI大厂与投资机构资讯”板块
 - 关联动态中的来源链接，不使用”查看原帖”，统一写成 [@本名](url)（本名不是X用户名）
-- 文末新增 Today's Summary 板块，用一个自然段完成（不分点，不超过200字）
+- 文末新增 Today's Summary 板块，**必须用 `## Today's Summary` 作为独立的二级标题**，内容用一个自然段完成（不分点，不超过200字）；**不得将 Today's Summary 作为编号列表中的一项**
 - 输出Markdown，结构清晰，分级列表明确
 `;
 }
