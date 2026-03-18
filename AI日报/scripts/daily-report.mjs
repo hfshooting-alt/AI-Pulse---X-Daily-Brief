@@ -509,6 +509,12 @@ function relabelSourceLinksWithRealNames(markdown, people) {
 function normalizeMarkdownLayout(markdown) {
   let text = String(markdown || '').replace(/\r\n/g, '\n').trim();
   text = text.replace(/^\s*\*\s*$/gm, '');
+  // Convert indented numbered items to dash items EARLY (before the newline-insertion
+  // regex below strips their indentation).  The /m flag makes ^ match each line start.
+  // Use [^\S\n]+ (non-newline whitespace) so that \s doesn't eat a \n and accidentally
+  // match top-level items preceded by a blank line.
+  text = text.replace(/^([^\S\n]+)\d+\.\s+/gm, '$1- ');
+
   text = text.replace(/([^\n])\s+(#{1,6}\s)/g, '$1\n\n$2');
   text = text.replace(/([^\n])\s+(\d+\.\s+)/g, '$1\n\n$2');
   text = text.replace(/\*\*事件：\*\*/g, '\n○ **热点解析：**');
@@ -736,7 +742,7 @@ function markdownToStyledHtml(markdown) {
   const top3 = [];
   const secondary = [];
   for (const evt of events) {
-    if (top3.length < 3 && /top\s*3|热度事件/i.test(evt.sectionTitle || '')) {
+    if (top3.length < 3 && /top\s*3|(?<!中)热度事件/i.test(evt.sectionTitle || '')) {
       top3.push(evt);
     } else {
       secondary.push(evt);
