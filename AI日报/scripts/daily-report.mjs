@@ -856,7 +856,8 @@ function getPromptTemplate() {
 \`\`\`
 
 ### 中热度事件
-用 ### 作为Topic标题，每个Topic下用编号列表输出事件，共输出7-12条事件，分成2-4个Topic：
+用 ### 作为Topic标题，每个Topic下用编号列表输出事件，共输出7-12条事件，分成2-4个Topic。
+**每个Topic内的事件也必须严格按 participantCount 从高到低排列**（数据中已按此顺序排好）：
 
 \`\`\`
 ## 中热度话题
