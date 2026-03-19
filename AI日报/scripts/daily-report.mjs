@@ -773,6 +773,9 @@ function markdownToStyledHtml(markdown) {
       } else if (/相关动态[:：]/.test(plain)) {
         const value = plain.replace(/^相关动态[:：]\s*/, '').trim();
         if (value) currentEvent.actions.push(value);
+      } else if (/^\[@[^\]]+\]\(https?:\/\/[^)]+\)\s*[:：]/.test(plain)) {
+        // Dynamic entry with source link — treat as action content, not a bare source
+        currentEvent.actions.push(plain);
       } else if (/^@/.test(plain) || /https?:\/\//.test(plain)) {
         currentEvent.sources.push(plain);
       } else if (plain) {
