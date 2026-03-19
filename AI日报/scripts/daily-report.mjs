@@ -351,11 +351,27 @@ function getItemThreadKey(item) {
   return text ? text.slice(0, 80) : 'unknown-thread';
 }
 
+// Simple word-overlap similarity between two texts (Jaccard on word bigrams)
+function textSimilarity(textA, textB) {
+  const bigrams = (t) => {
+    const words = t.replace(/https?:\/\/\S+/g, '').replace(/[^\w\u4e00-\u9fff]+/g, ' ').trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const bg = new Set();
+    for (let i = 0; i < words.length - 1; i++) bg.add(`${words[i]} ${words[i + 1]}`);
+    return bg;
+  };
+  const a = bigrams(textA);
+  const b = bigrams(textB);
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const x of a) if (b.has(x)) intersection++;
+  return intersection / (a.size + b.size - intersection);
+}
+
 function buildPromptItems(items) {
   // Two-pass dedup:
-  // 1. Per handle+thread (original dedup for multi-label items)
-  // 2. Per handle+topic — keep only the longest/most informative item per person per topic
-  //    so that one person posting 5 threads about the same topic only appears once
+  // 1. Per handle+thread — collapse multi-tweet threads from same person
+  // 2. Per handle text-similarity — only dedup near-duplicate texts from same person
+  //    (NOT per broad category, so distinct events from same person are preserved)
 
   // Pass 1: thread-level dedup
   const threadDeduped = new Map();
@@ -366,27 +382,28 @@ function buildPromptItems(items) {
     if (!threadDeduped.has(key)) threadDeduped.set(key, item);
   }
 
-  // Pass 2: per person + topic dedup — keep the top 3 longest items per person
-  // per topic category.  The old logic kept only 1 which discarded distinct events
-  // that happened to share a broad category (e.g. two different model launches both
-  // classified as "模型与推理能力").
-  const MAX_PER_PERSON_TOPIC = 3;
-  const topicBuckets = new Map();
+  // Pass 2: per-person text-similarity dedup — remove near-duplicate content
+  // from the same person (similarity > 0.5), but keep distinct events even if
+  // they share the same broad topic category.
+  const SIMILARITY_THRESHOLD = 0.5;
+  const perPerson = new Map();
   for (const item of threadDeduped.values()) {
     const handle = normalizeHandle(extractHandleFromItem(item)) || 'unknown';
-    const text = extractTextFromItem(item);
-    const labels = classifyHotspots(text);
-    const primaryLabel = labels[0] || 'other';
-    const key = `${handle}::${primaryLabel}`;
-
-    if (!topicBuckets.has(key)) topicBuckets.set(key, []);
-    topicBuckets.get(key).push(item);
+    if (!perPerson.has(handle)) perPerson.set(handle, []);
+    perPerson.get(handle).push(item);
   }
 
   const result = [];
-  for (const bucket of topicBuckets.values()) {
-    bucket.sort((a, b) => extractTextFromItem(b).length - extractTextFromItem(a).length);
-    result.push(...bucket.slice(0, MAX_PER_PERSON_TOPIC));
+  for (const personItems of perPerson.values()) {
+    // Sort by text length descending — keep longer (more informative) items first
+    personItems.sort((a, b) => extractTextFromItem(b).length - extractTextFromItem(a).length);
+    const kept = [];
+    for (const item of personItems) {
+      const text = extractTextFromItem(item);
+      const isDuplicate = kept.some((k) => textSimilarity(extractTextFromItem(k), text) > SIMILARITY_THRESHOLD);
+      if (!isDuplicate) kept.push(item);
+    }
+    result.push(...kept);
   }
 
   return result;
@@ -919,21 +936,22 @@ function markdownToStyledHtml(markdown) {
 
 function getPromptTemplate() {
   return process.env.REPORT_PROMPT_TEMPLATE || `你是一个专业的AI行业分析师和情报Agent。
-请根据提供的数据生成日报。
+请根据提供的原始动态数据生成日报。
 
 # AI Pulse - X Daily Brief
 
-## 排名核心规则（必须遵守）
-- **热度排名唯一标准是”参与人数”（participantCount）**，即有多少个不同的人讨论了这个话题
-- 同一个人发多条推文/引用/回复，只算1个参与者
-- 统计数据中的 participants 数组列出了每个话题的所有唯一参与者，请严格按此排序
-- 仅在参与人数完全相同时，再参考 interactionGroupCount 和 count
+## 聚类核心规则（必须遵守）
+- **先逐条判断每条动态的具体主题**（例如”Claude 4发布”、”GPU供应链紧张”、”Cursor融资”等具体事件），而不是直接按预设大类归并
+- **然后将主题相同或高度相关的动态聚类为一个”事件”**
+- **每个事件的热度 = 涉及的不同人数（participantCount）**，即有多少个不同的人讨论了这个具体事件
+- 同一个人发多条推文/引用/回复关于同一事件，只算1个参与者
+- 提供的话题统计仅作宏观参考，不要直接用其分类结果，请你独立从数据中发现具体事件
 - **输出中不要显示参与人数、participantCount 等统计数字，只用于排序**
 
 ## 输出格式（严格遵守）
 
 ### TOP3热度事件
-用 ## 标题 + 编号列表输出，严格按 participantCount 排序（数据中已排好序）。
+从聚类结果中选出参与人数最多的3个具体事件。
 **每条TOP3事件至少包含3条相关动态，每条动态必须有来源链接。**
 
 \`\`\`
@@ -962,10 +980,12 @@ function getPromptTemplate() {
 \`\`\`
 
 ### 中热度事件
-用 ### 作为Topic标题，每个Topic下用编号列表输出事件，共输出7-12条事件，分成2-4个Topic。
-**跨Topic排列规则：participantCount 最高的事件必须出现在最前面的Topic中。如果一个Topic包含的事件平均participantCount明显更高，该Topic应排在前面。**
-**每个Topic内的事件也必须严格按 participantCount 从高到低排列**（数据中已按此顺序排好）。
+从剩余聚类结果中，选出参与人数次高的事件，共输出7-12条事件，分成2-4个Topic。
+**每条事件都是一个具体的、独立的事件（如一个产品发布、一项研究突破、一次融资），而不是笼统的大类。**
+**跨Topic排列规则：包含更高参与人数事件的Topic排在前面。**
+**每个Topic内的事件也必须严格按参与人数从高到低排列。**
 **每个Topic至少包含2条事件，每条事件至少包含2条相关动态。**
+**即使只有1个人提到的独立事件，如果有足够信息价值，也可以作为中热度事件输出（放在靠后的Topic中）。**
 
 \`\`\`
 ## 中热度话题
@@ -992,13 +1012,13 @@ function getPromptTemplate() {
 \`\`\`
 
 ### 通用规则
-- 不需要按传统行业大类分类
-- **关键约束：同一事件内，每个账号（@handle）最多只能出现1次。** 数据已按每人每话题去重，每条数据代表一个不同的人的观点，请全部使用，不要重复引用同一人
+- 不需要按传统行业大类分类，请根据数据内容自行发现具体事件
+- **关键约束：同一事件内，每个账号（@handle）最多只能出现1次。** 每条数据代表一个不同的人的观点，请全部使用，不要重复引用同一人
 - 不要输出”聚类一/二/三”字样；不要输出”额外观察”与”AI大厂与投资机构资讯”板块
 - 关联动态中的来源链接，不使用”查看原帖”，统一写成 [@本名](url)（本名不是X用户名）
 - **【强制】每条”相关动态”都必须包含来源链接 [@本名](url)，没有来源链接的动态不要输出。每条动态的格式必须是： - [@本名](url): 描述文字… ，冒号前面是来源链接，冒号后面是描述。**
 - **每条事件的”相关动态”至少2条，尽量3条以上。如果某事件只有1个来源，则将该事件合并到相关事件中，不要单独列出。**
-- 文末新增 Today's Summary 板块，**必须用 ## Today's Summary 作为独立的二级标题**，内容用一个自然段完成（不分点，不超过200字）；**不得将 Today's Summary 作为编号列表中的一项**
+- **不要输出 Today's Summary 板块**，Summary将在报告生成后单独生成
 - 输出Markdown，结构清晰，分级列表明确
 `;
 }
@@ -1078,6 +1098,22 @@ async function runApifyBatched(templateInput, handles, since, until, { batchSize
   return allItems;
 }
 
+async function generateSummary({ apiKey, model, reportMarkdown }) {
+  const summaryPrompt = `你是一个专业的AI行业分析师。以下是今天生成的AI日报内容，请根据日报内容撰写一段 Today's Summary。
+
+要求：
+- 用 ## Today's Summary 作为独立的二级标题
+- 内容用一个自然段完成（不分点，不超过200字）
+- 不得将 Today's Summary 作为编号列表中的一项
+- 概括今天日报中最重要的趋势和事件
+- 只输出 ## Today's Summary 部分，不要输出其他内容
+
+日报内容：
+${reportMarkdown}`;
+
+  return requestGeminiReport({ apiKey, model, prompt: summaryPrompt });
+}
+
 async function generateReport(items, top20, stats, peopleStats) {
   if (!Array.isArray(items) || items.length === 0) {
     return `# AI Pulse - X Daily Brief\n\n今日无可用AI相关内容。\n`;
@@ -1089,34 +1125,30 @@ async function generateReport(items, top20, stats, peopleStats) {
 
   const promptItems = buildPromptItems(items);
 
-  // Build a participantCount lookup from stats for each topic label
-  const topicParticipantMap = new Map();
-  if (stats?.hotspots) {
-    for (const hs of stats.hotspots) {
-      topicParticipantMap.set(hs.label, hs.participantCount);
-    }
-  }
-
-  // Extract only the fields Gemini needs to reduce token usage
+  // Extract only the fields Gemini needs — do NOT tag with broad categories
+  // so that Gemini clusters by actual content similarity, not our 9 predefined labels.
   const compactItems = promptItems.map((item) => {
     const handle = extractHandleFromItem(item);
     const text = extractTextFromItem(item);
     const url = item?.url || item?.tweetUrl || item?.link || '';
     const createdAt = item?.createdAt || item?.created_at || item?.date || '';
-    const primaryTopic = classifyHotspots(text)[0] || '其他AI动态';
-    const compact = { handle, text: text.slice(0, 500), topic: primaryTopic };
+    const compact = { handle, text: text.slice(0, 500) };
     if (url) compact.url = url;
     if (createdAt) compact.date = typeof createdAt === 'string' ? createdAt.slice(0, 19) : createdAt;
-    // Attach participantCount so LLM can verify sorting
-    const pc = topicParticipantMap.get(primaryTopic);
-    if (pc != null) compact.topicParticipantCount = pc;
     return compact;
   });
-  const prompt = `${getPromptTemplate()}\n\n话题统计（已按participantCount降序排列，participants列出每个话题的唯一参与者）：\n${JSON.stringify(stats, null, 2)}\n\n去重后的参与样本（每人每话题仅保留1条最具代表性的内容，共${compactItems.length}条）。每条包含 topic（所属话题分类）和 topicParticipantCount（该话题参与人数），请据此排序：\n${JSON.stringify(compactItems, null, 2)}`;
+  const prompt = `${getPromptTemplate()}\n\n话题统计（宏观参考，已按participantCount降序排列）：\n${JSON.stringify(stats, null, 2)}\n\n去重后的原始动态（共${compactItems.length}条）。请你独立判断每条动态的具体主题，然后按主题相似性聚类为具体事件，再根据每个事件涉及的不同人数（participantCount）排序：\n${JSON.stringify(compactItems, null, 2)}`;
   const markdown = await requestGeminiReport({ apiKey, model, prompt });
   const normalized = normalizeMarkdownLayout(markdown);
   const withRealNameLinks = relabelSourceLinksWithRealNames(normalized, top20);
-  return appendTop20Appendix(withRealNameLinks, top20, peopleStats);
+  const reportBody = appendTop20Appendix(withRealNameLinks, top20, peopleStats);
+
+  // Generate summary as a separate step based on the finished report
+  console.log('Generating Today\'s Summary based on report content...');
+  const summarySection = await generateSummary({ apiKey, model, reportMarkdown: reportBody });
+  // Remove any existing summary from reportBody (in case Gemini still included one)
+  const reportWithoutSummary = reportBody.replace(/## Today's Summary[\s\S]*?(?=\n## |\n---|\n\*\*|$)/, '').trimEnd();
+  return `${reportWithoutSummary}\n\n${summarySection.trim()}\n`;
 }
 
 async function sendEmail(reportMarkdown) {
