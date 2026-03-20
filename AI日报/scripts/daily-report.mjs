@@ -1036,7 +1036,7 @@ async function requestGeminiReportOnce({ apiKey, model, prompt }) {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
           temperature: Number(process.env.GEMINI_TEMPERATURE || 0.2),
-          maxOutputTokens: 8192,
+          maxOutputTokens: 65536,
         },
       }),
       signal: controller.signal,
@@ -1047,6 +1047,15 @@ async function requestGeminiReportOnce({ apiKey, model, prompt }) {
 
   if (!response.ok) throw new Error(`Gemini request failed: ${response.status} ${await response.text()}`);
   const json = await response.json();
+
+  // Check if output was truncated due to token limit
+  const finishReason = json?.candidates?.[0]?.finishReason;
+  if (finishReason === 'MAX_TOKENS') {
+    console.warn('WARNING: Gemini output was truncated due to maxOutputTokens limit. Report may be incomplete.');
+  } else if (finishReason === 'SAFETY') {
+    console.warn('WARNING: Gemini output was blocked or truncated due to safety filters.');
+  }
+
   const text = (json?.candidates || [])
     .flatMap((c) => (c?.content?.parts || []).map((p) => p?.text).filter(Boolean))
     .join('\n')
