@@ -1135,6 +1135,31 @@ ${reportMarkdown}`;
   return requestGeminiReport({ apiKey, model, prompt: summaryPrompt });
 }
 
+async function loadPromptRules() {
+  const rulesPath = path.resolve(import.meta.dirname || path.dirname(new URL(import.meta.url).pathname), '..', 'prompt-rules.md');
+  try {
+    const content = await fs.readFile(rulesPath, 'utf-8');
+    // Strip markdown comments and metadata, keep only actual rules
+    const rules = content
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/^#\s+Prompt Rules.*$/m, '')
+      .replace(/^>\s+.*$/gm, '')
+      .replace(/^---$/gm, '')
+      .replace(/^##\s+使用方法[\s\S]*?(?=^## 规则列表)/m, '')
+      .replace(/^##\s+规则列表\s*/m, '')
+      .trim();
+    if (rules.length > 0) {
+      console.log(`Loaded prompt-rules.md (${rules.length} chars)`);
+      return rules;
+    }
+    console.log('prompt-rules.md is empty, no extra rules applied.');
+    return '';
+  } catch {
+    console.log('No prompt-rules.md found, skipping extra rules.');
+    return '';
+  }
+}
+
 async function generateReport(items, top20, stats, peopleStats) {
   if (!Array.isArray(items) || items.length === 0) {
     return `# AI Pulse - X Daily Brief\n\n今日无可用AI相关内容。\n`;
@@ -1158,7 +1183,9 @@ async function generateReport(items, top20, stats, peopleStats) {
     if (createdAt) compact.date = typeof createdAt === 'string' ? createdAt.slice(0, 19) : createdAt;
     return compact;
   });
-  const prompt = `${getPromptTemplate()}\n\n话题统计（宏观参考，已按participantCount降序排列）：\n${JSON.stringify(stats, null, 2)}\n\n去重后的原始动态（共${compactItems.length}条）。请你独立判断每条动态的具体主题，然后按主题相似性聚类为具体事件，再根据每个事件涉及的不同人数（participantCount）排序：\n${JSON.stringify(compactItems, null, 2)}`;
+  const promptRules = await loadPromptRules();
+  const rulesSection = promptRules ? `\n\n## 额外规则（基于历史反馈，必须遵守）\n${promptRules}` : '';
+  const prompt = `${getPromptTemplate()}${rulesSection}\n\n话题统计（宏观参考，已按participantCount降序排列）：\n${JSON.stringify(stats, null, 2)}\n\n去重后的原始动态（共${compactItems.length}条）。请你独立判断每条动态的具体主题，然后按主题相似性聚类为具体事件，再根据每个事件涉及的不同人数（participantCount）排序：\n${JSON.stringify(compactItems, null, 2)}`;
   const markdown = await requestGeminiReport({ apiKey, model, prompt });
   const normalized = normalizeMarkdownLayout(markdown);
   const withRealNameLinks = relabelSourceLinksWithRealNames(normalized, top20);
