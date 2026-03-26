@@ -1315,10 +1315,7 @@ async function sendEmail(reportMarkdown) {
 async function crossValidateWithMedia({ apiKey, model, reportMarkdown }) {
   console.log('Starting cross-validation with Chinese AI media...');
 
-  // Use Apify web scraper or a simple search to find recent articles
-  // We search for recent AI articles from these three accounts
   const mediaNames = ['量子位', '机器之心', '新智元'];
-  const searchDate = formatBjtDateDaysAgo(0);
 
   const crossValidationPrompt = `你是一个AI行业分析师，负责对比验证日报的覆盖质量。
 
@@ -1357,7 +1354,7 @@ ${reportMarkdown.slice(0, 6000)}
 
 // Save cross-validation results to iteration log for user review
 async function saveIterationLog({ crossValidation, date }) {
-  const logPath = path.resolve(import.meta.dirname || path.dirname(new URL(import.meta.url).pathname), '..', 'artifacts', 'iteration-log.md');
+  const logPath = 'artifacts/iteration-log.md';
 
   let existing = '';
   try {
@@ -1378,6 +1375,75 @@ async function saveIterationLog({ crossValidation, date }) {
 
   console.log(`Iteration log saved: ${logPath}`);
   return logPath;
+}
+
+// Generate a full action sheet: ALL daily items from TOP20 people, grouped by topic.
+// This is the "complete picture" — the daily report is a curated subset of this sheet.
+async function generateActionSheet(allDailyItems, top20) {
+  const nameMap = new Map(top20.map((p) => [normalizeHandle(p.handle), p.name || p.handle]));
+  const top20Handles = new Set(top20.map((p) => normalizeHandle(p.handle)));
+
+  // Group items by topic
+  const topicGroups = new Map();
+
+  for (const item of allDailyItems) {
+    const handle = normalizeHandle(extractHandleFromItem(item));
+    if (!handle || !top20Handles.has(handle)) continue;
+
+    const text = extractTextFromItem(item);
+    const url = item?.url || item?.tweetUrl || item?.link || '';
+    const createdAt = item?.createdAt || item?.created_at || item?.date || '';
+    const dateStr = typeof createdAt === 'string' ? createdAt.slice(0, 16) : '';
+    const name = nameMap.get(handle) || handle;
+    const topics = classifyHotspots(text);
+
+    const entry = {
+      name,
+      handle,
+      text: text.replace(/\n/g, ' ').slice(0, 200),
+      url,
+      date: dateStr,
+    };
+
+    for (const topic of topics) {
+      if (!topicGroups.has(topic)) topicGroups.set(topic, []);
+      topicGroups.get(topic).push(entry);
+    }
+  }
+
+  // Sort topics by action count descending
+  const sortedTopics = Array.from(topicGroups.entries())
+    .sort((a, b) => b[1].length - a[1].length);
+
+  // Generate Markdown
+  const mdSections = sortedTopics.map(([topic, entries]) => {
+    const uniquePeople = new Set(entries.map((e) => e.name));
+    const header = `### ${topic}（${entries.length}条动态，${uniquePeople.size}人参与）\n`;
+    const rows = entries.map((e) => {
+      const link = e.url ? `[链接](${e.url})` : '无链接';
+      return `- **${e.name}**（@${e.handle}）${e.date ? `| ${e.date}` : ''}\n  ${e.text}… ${link}`;
+    });
+    return header + rows.join('\n');
+  });
+
+  const totalActions = allDailyItems.filter((item) => top20Handles.has(normalizeHandle(extractHandleFromItem(item)))).length;
+  const mdContent = `# TOP20 人物全量 Action Sheet\n\n> 共 ${totalActions} 条动态，覆盖 ${sortedTopics.length} 个话题领域\n> 日报内容是本表的子集与拓展\n\n${mdSections.join('\n\n')}\n`;
+
+  // Generate CSV
+  const csvHeader = 'topic,name,handle,date,text,url';
+  const csvRows = sortedTopics.flatMap(([topic, entries]) =>
+    entries.map((e) => {
+      const escapeCsv = (s) => `"${String(s || '').replaceAll('"', '""')}"`;
+      return [escapeCsv(topic), escapeCsv(e.name), escapeCsv(e.handle), escapeCsv(e.date), escapeCsv(e.text), escapeCsv(e.url)].join(',');
+    }),
+  );
+  const csvContent = `${csvHeader}\n${csvRows.join('\n')}\n`;
+
+  await fs.writeFile('artifacts/top20-action-sheet.md', mdContent, 'utf8');
+  await fs.writeFile('artifacts/top20-action-sheet.csv', csvContent, 'utf8');
+  console.log(`Action sheet saved: ${sortedTopics.length} topics, ${totalActions} total actions`);
+
+  return { mdPath: 'artifacts/top20-action-sheet.md', csvPath: 'artifacts/top20-action-sheet.csv' };
 }
 
 async function main() {
@@ -1421,6 +1487,11 @@ async function main() {
   const daily = await runApify(dailyInput);
   const aiRelatedDaily = daily.items.filter(isAiRelatedItem);
   console.log(`Daily items: ${daily.items.length}, AI-related: ${aiRelatedDaily.length}`);
+
+  // Generate full action sheet (ALL daily items from TOP20, grouped by topic)
+  // This runs independently and doesn't affect the daily report pipeline
+  await generateActionSheet(daily.items, top20);
+
   const hotspotStats = getHotspotStats(aiRelatedDaily);
   const dailyPeopleStats = getDailyPeopleStats(aiRelatedDaily);
 
