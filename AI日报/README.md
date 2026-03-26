@@ -1,60 +1,51 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# AI Pulse - X Daily Brief
 
-# Run and deploy your AI Studio app
+AI 行业日报自动生成 Agent。从 Twitter/X 采集 AI 领域 KOL 动态，经 Gemini 聚类分析后生成结构化日报，通过邮件发送。
 
-This contains everything you need to run your app locally.
+## 核心流程
 
-View your app in AI Studio: https://ai.studio/apps/641843a5-ce53-4d86-aa3d-2aab448276f4
+```
+Apify 采集 → 去重/聚类 → Gemini 生成日报 → Gemini 生成 Summary → SMTP 邮件发送
+```
 
-## Run Locally
+1. **数据采集**：通过 Apify Actor 抓取 TOP20 活跃 KOL 近 24h 的 Twitter 动态
+2. **数据清洗**：按 handle + 文本相似度两轮去重，过滤非 AI 相关内容
+3. **报告生成**：Gemini 根据动态数据独立聚类，按参与人数排序输出 TOP3 热点 + 中热度事件
+4. **Summary 生成**：基于完成的报告，单独生成面向高管的 200 字结构化摘要
+5. **邮件发送**：Markdown 渲染为 HTML，通过 SMTP 发送
 
-**Prerequisites:**  Node.js
+## 日报结构
 
+- **TOP3 热度事件** — 参与人数最多的 3 个具体事件，每条含热点解析 + 相关动态（附来源链接）
+- **中热度话题** — 7-12 条事件，按 Topic 分组
+- **TOP20 活跃人物附录** — 真名、账号、职位、今日 action 数量、涉及热点数
+- **Today's Summary** — 关键结论 / 重要原因 / 业务影响
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## 使用方式
 
-## GitHub Actions 自动化日报
+手动触发 GitHub Actions workflow（`workflow_dispatch`）。
 
-仓库已添加工作流：`.github/workflows/twitter-ai-daily-report.yml`。
+## 持续改进
 
-流程：
-1. 触发 Apify Actor 抓取数据。
-2. 拉取 Actor 输出数据集。
-3. 调用 OpenAI 生成日报 markdown。
-4. 通过 SMTP 发邮件到目标收件箱。
-5. 上传 `artifacts/daily-report.md` 作为 Action 构建产物。
+编辑 `prompt-rules.md` 添加反馈规则，下次生成日报时自动生效。
 
-可手动触发（workflow_dispatch），也可按 cron 每天自动触发。
+## 环境变量
 
-### Apify 配置注意事项
-
-- `APIFY_ACTOR_ID` 请填写 Actor 标识：`apidojo/tweet-scraper` 或 `apidojo~tweet-scraper`（脚本会自动兼容这两种写法）。
-- `APIFY_TOKEN` 可以填纯 token，也可以直接填带 `?token=...` 的完整 API URL，脚本会自动提取 token。
-- `APIFY_TASK_ID` 已不再使用，无需配置。
-- 仅当设置 `APIFY_ACTOR_INPUT_JSON` 时，脚本才会覆盖输入；未设置时沿用 Actor 默认输入。
-- 若 `APIFY_ACTOR_INPUT_JSON` 包含 `searchTerms`，脚本会按北京时间（Asia/Shanghai）自动改写每项中的 `since`/`until` 为“昨天→今天”的日期窗口后再调用 Apify。
-- 若模板 JSON 存在尾逗号，脚本会在不改变语义前提下自动修正为合法 JSON 再解析。
-- 运行日志会打印 `Using OPENAI_MODEL=...`，可直接确认 Action 实际调用的模型名。
-- 邮件正文会将 Markdown 渲染为分级样式 HTML（标题字号、层级列表、颜色区分），并将来源链接渲染为可点击 `@本名` 超链接。
-- 日报格式会自动清理独立 `*` 噪声行，并按章节自动重排编号（避免每条都显示为 `1.`）。
-
-- 可选：`APIFY_PEOPLE_JSON` 支持传入人物库（JSON数组或每行 `name,item`/`name,handle`）；脚本优先读取 `item` 字段并转换为 `from:<item> since:<date> until:<date>` 形式。
-- 采集逻辑：先按“近7天、最多1000条”拉全量输出并保存 `artifacts/all-outputs.json`，再按输出量排名取TOP20用于“近1天”日报生成。
-- 每人近7天动态数表格会写入 `AI日报/artifacts/ai-weekly-output-counts.md` 与 `AI日报/artifacts/ai-weekly-output-counts.csv`，并随 workflow artifact 一起下载。
-- 日报末尾会自动追加附录，列出TOP20人物的真名、账号与输出数量。
-- `TOP20活跃人物` 行格式为：`真名（@用户名）| 职位：一句话介绍 | 今日action数量：X，涉及到Y个热点`（X/Y基于第二次日内抓取与热点归类统计）。
-
-- 日报主标题统一为 `AI Pulse - X Daily Brief`。
-- 来源链接文案统一为 `@本名` 超链接（不再使用“查看原帖”与X用户名显示）。
-- 事件结构统一为“热点解析 + 相关动态”。
-
-- 附录标题统一为 `TOP20活跃人物`，每位人物包含：本名、账号、职位、一句话介绍、今日action数量、涉及热点数量。
-
-- 正文末尾新增 `Today's Summary`（面向高管），按“关键结论/重要原因/业务影响”结构化输出，限制在200字内。
-- 附录新增“每日Action数量”和“每日涉及热点数量”，并给出热点概览排序。
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `APIFY_TOKEN` | 是 | Apify API Token |
+| `APIFY_ACTOR_ID` | 是 | Apify Actor 标识 |
+| `APIFY_ACTOR_INPUT_JSON` | 否 | Actor 输入覆盖（含 searchTerms 时自动改写日期窗口） |
+| `APIFY_PEOPLE_JSON` | 否 | 人物库 JSON |
+| `GEMINI_API_KEY` | 是 | Gemini API Key |
+| `GEMINI_MODEL` | 是 | Gemini 模型名 |
+| `GEMINI_MAX_OUTPUT_TOKENS` | 否 | 最大输出 token（默认 65536） |
+| `GEMINI_TEMPERATURE` | 否 | 温度参数（默认 1.0） |
+| `GEMINI_THINKING_LEVEL` | 否 | 思考深度 minimal/low/medium/high |
+| `SMTP_HOST` | 是 | SMTP 服务器 |
+| `SMTP_PORT` | 是 | SMTP 端口 |
+| `SMTP_USER` | 是 | SMTP 用户名 |
+| `SMTP_PASS` | 是 | SMTP 密码 |
+| `MAIL_FROM` | 是 | 发件人 |
+| `MAIL_TO` | 是 | 收件人 |
+| `MAIL_SUBJECT` | 否 | 邮件主题 |
