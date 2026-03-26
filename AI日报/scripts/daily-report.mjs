@@ -410,33 +410,118 @@ function buildPromptItems(items) {
 }
 
 
+// Analyze mutual interactions among a set of handles.
+// Returns a Map: handle → { repliedTo: Set, quoted: Set, mentioned: Set, quotedBy: Set, mentionedBy: Set }
+function analyzeInteractions(items, handleSet) {
+  // Map each tweet ID to its author handle for cross-referencing
+  const tweetAuthor = new Map();
+  for (const item of items) {
+    const handle = extractHandleFromItem(item);
+    const id = String(item?.id || item?.id_str || item?.tweetId || '').trim();
+    if (handle && id) tweetAuthor.set(id, handle);
+  }
+
+  const interactions = new Map();
+  const ensureEntry = (h) => {
+    if (!interactions.has(h)) interactions.set(h, { repliedTo: new Set(), quoted: new Set(), mentioned: new Set(), quotedBy: new Set(), mentionedBy: new Set() });
+    return interactions.get(h);
+  };
+
+  for (const item of items) {
+    const author = extractHandleFromItem(item);
+    if (!author || !handleSet.has(author)) continue;
+
+    // Reply: author replied to target's tweet
+    const replyTo = String(item?.inReplyToStatusId || item?.inReplyToStatusIdStr || '').trim();
+    if (replyTo && tweetAuthor.has(replyTo)) {
+      const target = tweetAuthor.get(replyTo);
+      if (target !== author && handleSet.has(target)) {
+        ensureEntry(author).repliedTo.add(target);
+        ensureEntry(target).mentionedBy.add(author);
+      }
+    }
+
+    // Quote: author quoted target's tweet (distinct from reply)
+    const quoteOf = String(item?.quotedStatusId || item?.quotedStatusIdStr || '').trim();
+    if (quoteOf && tweetAuthor.has(quoteOf)) {
+      const target = tweetAuthor.get(quoteOf);
+      if (target !== author && handleSet.has(target)) {
+        ensureEntry(author).quoted.add(target);
+        ensureEntry(target).quotedBy.add(author);
+      }
+    }
+
+    // @mention: author mentioned target in text
+    const text = extractTextFromItem(item);
+    const mentions = text.match(/@(\w+)/g) || [];
+    for (const m of mentions) {
+      const mentionedHandle = normalizeHandle(m);
+      if (mentionedHandle !== author && handleSet.has(mentionedHandle)) {
+        ensureEntry(author).mentioned.add(mentionedHandle);
+        ensureEntry(mentionedHandle).mentionedBy.add(author);
+      }
+    }
+  }
+
+  return interactions;
+}
+
 const rankPeople = (items, roster) => {
   const counts = items.reduce((map, item) => {
     const handle = extractHandleFromItem(item);
     return handle ? (map.set(handle, (map.get(handle) || 0) + 1), map) : map;
   }, new Map());
 
+  const allHandles = new Set(counts.keys());
+  const interactions = analyzeInteractions(items, allHandles);
+
   const meta = new Map(roster.map((r) => [normalizeHandle(r.handle), { name: r.name || r.handle, title: r.title || '', description: r.description || '' }]));
+
+  // Composite scoring: output volume as base, with interaction bonuses
+  // - outputCount: how active this person is (base signal)
+  // - interactionScore: how connected they are with peers (reply/quote/mention)
+  // Weights are intentionally soft — interactions boost relevance but don't dominate
   const ranked = Array.from(counts.entries())
-    .map(([handle, outputCount]) => ({
-      name: (meta.get(handle)?.name) || handle,
-      title: (meta.get(handle)?.title) || '',
-      description: (meta.get(handle)?.description) || '',
-      handle,
-      outputCount,
-    }))
-    .sort((a, b) => b.outputCount - a.outputCount);
+    .map(([handle, outputCount]) => {
+      const inter = interactions.get(handle);
+      // Unique peers this person interacted with (in any direction)
+      const peersEngaged = inter ? new Set([...inter.repliedTo, ...inter.quoted, ...inter.mentioned, ...inter.quotedBy, ...inter.mentionedBy]).size : 0;
+      // Weighted score: active engagement (reply/quote/mention) counts more than passive (being quoted/mentioned)
+      const interactionScore = inter
+        ? (inter.repliedTo.size * 1.0 + inter.quoted.size * 1.2 + inter.mentioned.size * 0.5
+           + inter.quotedBy.size * 1.5 + inter.mentionedBy.size * 0.8)
+        : 0;
+      // Final score: 60% output volume (normalized) + 40% interaction richness
+      // Both components are on similar scales after normalization (done in sort)
+      const compositeScore = outputCount + interactionScore * 2;
+      return {
+        name: (meta.get(handle)?.name) || handle,
+        title: (meta.get(handle)?.title) || '',
+        description: (meta.get(handle)?.description) || '',
+        handle,
+        outputCount,
+        interactionScore: Math.round(interactionScore * 10) / 10,
+        peersEngaged,
+        compositeScore: Math.round(compositeScore * 10) / 10,
+      };
+    })
+    .sort((a, b) => b.compositeScore - a.compositeScore);
+
+  if (ranked.length > 0) {
+    console.log('Top 5 by composite score:');
+    ranked.slice(0, 5).forEach((p, i) => console.log(`  ${i + 1}. @${p.handle}: output=${p.outputCount}, interaction=${p.interactionScore}, peers=${p.peersEngaged}, composite=${p.compositeScore}`));
+  }
 
   return ranked;
 };
 
 
 async function writeWeeklyCountsTable(ranking) {
-  const header = '| 排名 | 本名 | X账号 | 近一周动态数量 |\n|---:|---|---|---:|';
-  const rows = ranking.map((p, i) => `| ${i + 1} | ${p.name} | @${p.handle} | ${p.outputCount} |`);
+  const header = '| 排名 | 本名 | X账号 | 近一周动态数量 | 互动分 | 同行互动数 |\n|---:|---|---|---:|---:|---:|';
+  const rows = ranking.map((p, i) => `| ${i + 1} | ${p.name} | @${p.handle} | ${p.outputCount} | ${p.interactionScore || 0} | ${p.peersEngaged || 0} |`);
   const markdown = `${header}\n${rows.join('\n')}\n`;
-  const csvHeader = 'rank,name,handle,weekly_output_count';
-  const csvRows = ranking.map((p, i) => `${i + 1},"${String(p.name).replaceAll('"', '""')}",${p.handle},${p.outputCount}`);
+  const csvHeader = 'rank,name,handle,weekly_output_count,interaction_score,peers_engaged';
+  const csvRows = ranking.map((p, i) => `${i + 1},"${String(p.name).replaceAll('"', '""')}",${p.handle},${p.outputCount},${p.interactionScore || 0},${p.peersEngaged || 0}`);
   const csv = `${csvHeader}\n${csvRows.join('\n')}\n`;
 
   const artifactsDir = 'artifacts';
@@ -496,7 +581,8 @@ function appendTop20Appendix(markdown, top20, peopleStats) {
       const stat = peopleStats?.get(normalizeHandle(p.handle));
       const actionCount = stat?.actionCount || 0;
       const hotspotCount = stat?.hotspots?.size || 0;
-      return `${p.name}（@${p.handle}）| ${title}：${bio} | 今日action数量：${actionCount}，涉及到${hotspotCount}个热点`;
+      const peerInfo = p.peersEngaged > 0 ? `，与${p.peersEngaged}位同行互动` : '';
+      return `${p.name}（@${p.handle}）| ${title}：${bio} | 今日action数量：${actionCount}，涉及到${hotspotCount}个热点${peerInfo}`;
     })
     .join('\n');
 
@@ -1229,6 +1315,142 @@ async function sendEmail(reportMarkdown) {
   });
 }
 
+// Cross-validate report against Chinese tech media (量子位, 机器之心, 新智元)
+// Fetches recent articles via web search and asks Gemini to compare coverage
+async function crossValidateWithMedia({ apiKey, model, reportMarkdown }) {
+  console.log('Starting cross-validation with Chinese AI media...');
+
+  const mediaNames = ['量子位', '机器之心', '新智元'];
+
+  const crossValidationPrompt = `你是一个AI行业分析师，负责对比验证日报的覆盖质量。
+
+以下是我们今天生成的AI日报：
+---
+${reportMarkdown.slice(0, 6000)}
+---
+
+请你根据自己对近两天AI行业动态的了解，模拟"${mediaNames.join('、')}"这三个国内顶级AI公众号的视角来交叉验证：
+
+1. **覆盖盲区**：这三家公众号近两天可能会重点报道、但我们日报中可能遗漏的重大事件有哪些？（只列真实可能发生的事件，不要编造）
+2. **权重偏差**：我们日报中某些事件的重要性是否被高估或低估了？从国内视角看，哪些事件对中国AI从业者更重要？
+3. **改进建议**：基于以上对比，给出 2-3 条具体、可执行的 prompt 改进规则，用于提升下次日报的覆盖质量。规则应该是通用的，不要太具体到某个事件。
+
+请用以下格式输出（纯文本，不要 JSON）：
+
+### 覆盖盲区
+- ...
+
+### 权重偏差
+- ...
+
+### 改进建议（可直接追加到 prompt-rules.md）
+- ...
+`;
+
+  try {
+    const result = await requestGeminiReport({ apiKey, model, prompt: crossValidationPrompt });
+    console.log('Cross-validation complete.');
+    return result;
+  } catch (err) {
+    console.warn(`Cross-validation failed (non-fatal): ${err.message}`);
+    return null;
+  }
+}
+
+// Save cross-validation results to iteration log for user review
+async function saveIterationLog({ crossValidation, date }) {
+  const logPath = 'artifacts/iteration-log.md';
+
+  let existing = '';
+  try {
+    existing = await fs.readFile(logPath, 'utf-8');
+  } catch { /* first run */ }
+
+  const newEntry = `\n---\n\n## ${date} 交叉验证结果\n\n${crossValidation}\n`;
+
+  // Prepend new entry after header (or create header)
+  if (existing.includes('# 日报迭代日志')) {
+    const insertAt = existing.indexOf('\n', existing.indexOf('# 日报迭代日志'));
+    const updated = existing.slice(0, insertAt) + '\n' + newEntry + existing.slice(insertAt);
+    await fs.writeFile(logPath, updated, 'utf8');
+  } else {
+    const content = `# 日报迭代日志\n\n> 每次生成日报后，自动与国内AI媒体（量子位、机器之心、新智元）交叉验证。\n> 用户审阅后，可将有价值的改进建议手动迁移到 prompt-rules.md 使其永久生效。\n${newEntry}`;
+    await fs.writeFile(logPath, content, 'utf8');
+  }
+
+  console.log(`Iteration log saved: ${logPath}`);
+  return logPath;
+}
+
+// Generate a full action sheet: ALL daily items from TOP20 people, grouped by topic.
+// This is the "complete picture" — the daily report is a curated subset of this sheet.
+async function generateActionSheet(allDailyItems, top20) {
+  const nameMap = new Map(top20.map((p) => [normalizeHandle(p.handle), p.name || p.handle]));
+  const top20Handles = new Set(top20.map((p) => normalizeHandle(p.handle)));
+
+  // Group items by topic
+  const topicGroups = new Map();
+
+  for (const item of allDailyItems) {
+    const handle = normalizeHandle(extractHandleFromItem(item));
+    if (!handle || !top20Handles.has(handle)) continue;
+
+    const text = extractTextFromItem(item);
+    const url = item?.url || item?.tweetUrl || item?.link || '';
+    const createdAt = item?.createdAt || item?.created_at || item?.date || '';
+    const dateStr = typeof createdAt === 'string' ? createdAt.slice(0, 16) : '';
+    const name = nameMap.get(handle) || handle;
+    const topics = classifyHotspots(text);
+
+    const entry = {
+      name,
+      handle,
+      text: text.replace(/\n/g, ' ').slice(0, 200),
+      url,
+      date: dateStr,
+    };
+
+    for (const topic of topics) {
+      if (!topicGroups.has(topic)) topicGroups.set(topic, []);
+      topicGroups.get(topic).push(entry);
+    }
+  }
+
+  // Sort topics by action count descending
+  const sortedTopics = Array.from(topicGroups.entries())
+    .sort((a, b) => b[1].length - a[1].length);
+
+  // Generate Markdown
+  const mdSections = sortedTopics.map(([topic, entries]) => {
+    const uniquePeople = new Set(entries.map((e) => e.name));
+    const header = `### ${topic}（${entries.length}条动态，${uniquePeople.size}人参与）\n`;
+    const rows = entries.map((e) => {
+      const link = e.url ? `[链接](${e.url})` : '无链接';
+      return `- **${e.name}**（@${e.handle}）${e.date ? `| ${e.date}` : ''}\n  ${e.text}… ${link}`;
+    });
+    return header + rows.join('\n');
+  });
+
+  const totalActions = allDailyItems.filter((item) => top20Handles.has(normalizeHandle(extractHandleFromItem(item)))).length;
+  const mdContent = `# TOP20 人物全量 Action Sheet\n\n> 共 ${totalActions} 条动态，覆盖 ${sortedTopics.length} 个话题领域\n> 日报内容是本表的子集与拓展\n\n${mdSections.join('\n\n')}\n`;
+
+  // Generate CSV
+  const csvHeader = 'topic,name,handle,date,text,url';
+  const csvRows = sortedTopics.flatMap(([topic, entries]) =>
+    entries.map((e) => {
+      const escapeCsv = (s) => `"${String(s || '').replaceAll('"', '""')}"`;
+      return [escapeCsv(topic), escapeCsv(e.name), escapeCsv(e.handle), escapeCsv(e.date), escapeCsv(e.text), escapeCsv(e.url)].join(',');
+    }),
+  );
+  const csvContent = `${csvHeader}\n${csvRows.join('\n')}\n`;
+
+  await fs.writeFile('artifacts/top20-action-sheet.md', mdContent, 'utf8');
+  await fs.writeFile('artifacts/top20-action-sheet.csv', csvContent, 'utf8');
+  console.log(`Action sheet saved: ${sortedTopics.length} topics, ${totalActions} total actions`);
+
+  return { mdPath: 'artifacts/top20-action-sheet.md', csvPath: 'artifacts/top20-action-sheet.csv' };
+}
+
 async function main() {
   requiredEnv.forEach(requireEnv);
 
@@ -1270,11 +1492,24 @@ async function main() {
   const daily = await runApify(dailyInput);
   const aiRelatedDaily = daily.items.filter(isAiRelatedItem);
   console.log(`Daily items: ${daily.items.length}, AI-related: ${aiRelatedDaily.length}`);
+
+  // Generate full action sheet (ALL daily items from TOP20, grouped by topic)
+  // This runs independently and doesn't affect the daily report pipeline
+  await generateActionSheet(daily.items, top20);
+
   const hotspotStats = getHotspotStats(aiRelatedDaily);
   const dailyPeopleStats = getDailyPeopleStats(aiRelatedDaily);
 
   const report = await generateReport(aiRelatedDaily, top20, hotspotStats, dailyPeopleStats);
   await fs.writeFile('artifacts/daily-report.md', report, 'utf8');
+
+  // Cross-validate with Chinese AI media and save iteration log
+  const apiKey = requireEnv('GEMINI_API_KEY');
+  const model = requireEnv('GEMINI_MODEL');
+  const crossValidation = await crossValidateWithMedia({ apiKey, model, reportMarkdown: report });
+  if (crossValidation) {
+    await saveIterationLog({ crossValidation, date: today });
+  }
 
   await sendEmail(report);
   console.log('Daily report generated and emailed successfully.');

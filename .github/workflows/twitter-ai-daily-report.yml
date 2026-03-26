@@ -34,7 +34,7 @@ jobs:
       - name: Syntax check daily-report script
         run: node --check scripts/daily-report.mjs
 
-      - name: Run daily report pipeline (Apify -> OpenAI -> Email)
+      - name: Run daily report pipeline (Apify -> Gemini -> Email)
         run: npm run run:daily-report
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
@@ -66,3 +66,6 @@ jobs:
             AI日报/artifacts/daily-report.md
             AI日报/artifacts/ai-weekly-output-counts.md
             AI日报/artifacts/ai-weekly-output-counts.csv
+            AI日报/artifacts/iteration-log.md
+            AI日报/artifacts/top20-action-sheet.md
+            AI日报/artifacts/top20-action-sheet.csv
