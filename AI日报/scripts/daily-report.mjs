@@ -368,7 +368,7 @@ function isAiRelatedItem(item) {
   for (const k of enWeak) {
     if (new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text)) weakHits += 1;
   }
-  return weakHits >= 1;
+  return weakHits >= 2;
 }
 
 const HOTSPOT_RULES = [
@@ -392,11 +392,6 @@ function classifyHotspots(text) {
     })
     .map((rule) => rule.label);
   return matched.length > 0 ? matched : ['其他AI动态'];
-}
-
-// Single-label wrapper for backwards compatibility where only one label is needed
-function classifyHotspot(text) {
-  return classifyHotspots(text)[0];
 }
 
 const getHotspotStats = (items) => {
@@ -672,25 +667,102 @@ function getDailyPeopleStats(items) {
   return stats;
 }
 
+// Fallback profiles for TOP20 appendix — roster title/description takes priority.
+// Only used when a person enters TOP20 but their roster entry lacks title/description.
 const PEOPLE_PROFILE_MAP = {
-  elonmusk: { title: 'xAI创始人', bio: 'AI与算力叙事核心人物' },
-  sama: { title: 'OpenAI联合创始人', bio: 'OpenAI产品与战略核心' },
-  karpathy: { title: 'Eureka Labs创始人', bio: 'AI教育与工程化代表' },
-  ylecun: { title: 'Meta首席AI科学家', bio: '深度学习研究风向标' },
-  demishassabis: { title: 'Google DeepMind CEO', bio: '谷歌AI战略中枢' },
-  drjimfan: { title: 'NVIDIA高级研究员', bio: '机器人与具身智能前沿' },
-  andrewyng: { title: 'LandingAI创始人', bio: 'AI应用化推动者' },
-  drfeifei: { title: '斯坦福教授', bio: '视觉AI研究代表人物' },
-  ilyasut: { title: 'Safe Superintelligence联合创始人', bio: '新一代AI安全与能力路线' },
-  fchollet: { title: 'Google AI研究员', bio: 'Keras之父，模型评估观点鲜明' },
-  geoffreyhinton: { title: '图灵奖得主', bio: '深度学习奠基者之一' },
-  mustafasuleyman: { title: 'Microsoft AI CEO', bio: '消费级AI产品商业化负责人' },
-  gdb: { title: 'OpenAI产品负责人', bio: '产品化与开发者生态关键人物' },
-  darioamodei: { title: 'Anthropic CEO', bio: 'Claude路线与AI安全代表' },
-  aravsrinivas: { title: 'Perplexity CEO', bio: 'AI搜索产品化代表' },
+  // OpenAI
+  sama: { title: 'OpenAI CEO', bio: '生成式AI浪潮核心人物' },
+  gdb: { title: 'OpenAI总裁兼联合创始人', bio: 'OpenAI工程产品核心' },
+  merettm: { title: 'OpenAI首席科学家', bio: 'OpenAI研究新掌门' },
+  woj_zaremba: { title: 'OpenAI联合创始人', bio: 'OpenAI早期技术核心' },
+  bradlightcap: { title: 'OpenAI首席运营官', bio: 'OpenAI商业运营核心' },
+  npew: { title: 'OpenAI副总裁兼总经理', bio: '产品化落地关键高管' },
+  bobmcgrewai: { title: '前OpenAI首席研究官', bio: 'OpenAI早期研究核心' },
+  _jasonwei: { title: 'OpenAI研究科学家', bio: '链式思维研究代表' },
+  polynoamial: { title: 'OpenAI研究科学家', bio: '博弈与推理研究名将' },
+  willdepue: { title: 'OpenAI研究工程师', bio: 'Sora与后训练核心成员' },
+  joannejang: { title: 'OpenAI Labs总经理', bio: '模型行为产品负责人' },
+  romainhuet: { title: 'OpenAI开发者体验负责人', bio: 'Codex开发者关系门面' },
+  steipete: { title: 'OpenAI产品工程负责人', bio: '开发工具创业老兵' },
+  borismpower: { title: 'OpenAI应用研究负责人', bio: '科研走向应用的推手' },
+  sebastienbubeck: { title: 'OpenAI研究员', bio: '大模型推理研究强者' },
+  millionint: { title: 'OpenAI研究员', bio: '推理与智能体研究者' },
+  therealadamg: { title: 'OpenAI GTM负责人', bio: 'OpenAI产品传播账号' },
+  aidan_mclau: { title: 'OpenAI研究科学家', bio: '聚焦推理与模型能力' },
+  // Anthropic
+  darioamodei: { title: 'Anthropic CEO', bio: 'AI安全派创业代表' },
+  alexalbert__: { title: 'Anthropic Claude Relations', bio: 'Claude生态关键代言人' },
+  amandaaskell: { title: 'Anthropic伦理研究员', bio: 'Claude价值观设计者' },
+  jackclarksf: { title: 'Anthropic联合创始人兼政策主管', bio: 'AI政策与产业桥梁' },
+  janleike: { title: 'Anthropic安全研究负责人', bio: '对齐研究代表人物' },
+  mikeyk: { title: 'Anthropic首席产品官', bio: 'Instagram联创转战AI' },
+  bcherny: { title: 'Anthropic Claude Code负责人', bio: 'AI编程工具核心产品人' },
+  _sholtodouglas: { title: 'Anthropic RL研究员', bio: 'RL与编程智能体研究者' },
+  // Google / DeepMind
+  demishassabis: { title: 'Google DeepMind CEO', bio: '谷歌AGI主帅' },
+  jeffdean: { title: 'Google首席科学家', bio: '谷歌AI基建元老' },
+  sundarpichai: { title: 'Alphabet兼Google CEO', bio: '谷歌AI战略总负责人' },
+  officiallogank: { title: 'Google AI Studio', bio: 'Gemini开发者生态代言' },
+  shanelegg: { title: 'DeepMind首席AGI科学家', bio: 'AGI路线长期倡导者' },
+  oriolvinyalsml: { title: 'DeepMind研究副总裁', bio: '多智能体强化学习专家' },
+  goodfellow_ian: { title: 'DeepMind研究科学家', bio: 'GAN提出者' },
+  noamshazeer: { title: 'DeepMind杰出科学家', bio: 'Transformer核心作者之一' },
+  jiahui_yu_: { title: 'DeepMind研究科学家', bio: 'Gemini多模态核心研发' },
+  goodside: { title: 'DeepMind提示工程师', bio: '提示注入研究代表' },
+  // Meta
+  ylecun: { title: 'Meta首席AI科学家', bio: '深度学习三巨头之一' },
+  finkd: { title: 'Meta创始人兼CEO', bio: '社交巨头押注AI' },
+  natfriedman: { title: 'Meta超级智能实验室', bio: 'GitHub前CEO' },
+  soumithchintala: { title: 'PyTorch核心创建者', bio: 'Thinking Machines Lab CTO' },
+  yuxin_wu_: { title: 'Meta AI研究科学家', bio: '视觉与多模态模型专家' },
+  // Microsoft / xAI
+  mustafasuleyman: { title: 'Microsoft AI CEO', bio: '消费级AI产品掌舵' },
+  elonmusk: { title: 'xAI创始人', bio: 'AI与算力叙事中心' },
+  ibab: { title: 'xAI联合创始人', bio: 'xAI核心技术负责人' },
+  // 独立研究者 / 学者
+  karpathy: { title: 'Eureka Labs创始人', bio: '自动驾驶与LLM名将' },
+  ilyasut: { title: 'SSI联合创始人', bio: '深度学习传奇研究者' },
+  fchollet: { title: 'Google AI研究员', bio: 'Keras之父' },
+  drfeifei: { title: 'World Labs创始人兼CEO', bio: '视觉AI领军学者' },
+  drjimfan: { title: 'NVIDIA具身智能负责人', bio: '机器人基础模型布道者' },
+  andrewyng: { title: 'LandingAI创始人兼CEO', bio: 'AI教育产业化旗手' },
+  emollick: { title: '沃顿商学院教授', bio: 'AI办公实践头部学者' },
+  yejinchoinka: { title: '斯坦福大学教授', bio: '常识推理研究领军者' },
+  erikbryn: { title: '斯坦福数字经济实验室主任', bio: 'AI生产率研究权威' },
+  tri_dao: { title: '普林斯顿助理教授', bio: 'FlashAttention核心作者' },
+  awnihannun: { title: 'Apple机器学习研究员', bio: 'MLX框架核心开发者' },
+  // 创业者 / 产品人
+  aravsrinivas: { title: 'Perplexity CEO', bio: 'AI搜索赛道代表' },
   arthurmensch: { title: 'Mistral AI CEO', bio: '欧洲大模型创业代表' },
-  alexandr_wang: { title: 'Scale AI CEO', bio: '数据基础设施与企业AI代表' },
-  billgates: { title: '微软联合创始人', bio: '长期科技趋势观察者' },
+  alexandr_wang: { title: 'Scale AI创始人兼CEO', bio: '数据基础设施与企业AI' },
+  mntruell: { title: 'Cursor联合创始人兼CEO', bio: 'AI原生IDE代表人物' },
+  clementdelangue: { title: 'Hugging Face CEO', bio: '开源AI社区旗手' },
+  amasad: { title: 'Replit创始人兼CEO', bio: 'AI编程平台掌舵者' },
+  miramurati: { title: 'Thinking Machines Lab创始人', bio: 'OpenAI前CTO创业' },
+  hardmaru: { title: 'Sakana AI CEO', bio: '世界模型与演化研究者' },
+  hwchase17: { title: 'LangChain CEO', bio: 'AI Agent开发框架先驱' },
+  antonosika: { title: 'Lovable CEO', bio: 'Vibe coding创业代表' },
+  btaylor: { title: 'Sierra CEO', bio: '客服AI创业代表' },
+  _akhaliq: { title: 'Hugging Face ML工程师', bio: '高频转发AI论文产品' },
+  simonw: { title: '独立开发者与作家', bio: '开源LLM工程布道者' },
+  teknium: { title: 'Nous Research联合创始人', bio: '开源后训练社区代表' },
+  jiayq: { title: 'Lepton AI创始人', bio: 'Caffe作者' },
+  tqchen: { title: 'OctoML联合创始人', bio: 'TVM与XGBoost核心作者' },
+  justinlin610: { title: '阿里通义千问高级技术专家', bio: 'Qwen核心研发与开源推动者' },
+  tobi: { title: 'Shopify创始人兼CEO', bio: '电商平台拥抱AI代表' },
+  // 投资人 / 商业
+  billgates: { title: '盖茨基金会主席', bio: '科技慈善双栖代表' },
+  reidhoffman: { title: 'Greylock合伙人', bio: 'LinkedIn联创与AI投资人' },
+  vkhosla: { title: 'Khosla Ventures创始人', bio: '硬科技AI投资老兵' },
+  paulg: { title: 'Y Combinator联合创始人', bio: '硅谷创业教父' },
+  saranormous: { title: 'Conviction创始人', bio: 'AI创业投资女将' },
+  deedydas: { title: 'Menlo Ventures合伙人', bio: '技术派AI投资人' },
+  davidsacks: { title: '白宫AI与加密事务负责人', bio: '硅谷政商跨界人物' },
+  ajassy: { title: 'Amazon总裁兼CEO', bio: '云与AI基础设施掌舵' },
+  // 媒体 / 博主
+  rowancheung: { title: 'The Rundown AI创始人', bio: 'AI资讯头部博主' },
+  lexfridman: { title: 'MIT研究科学家兼播客主持', bio: '长访谈播客头部人物' },
+  dylan522p: { title: 'SemiAnalysis创始人', bio: '算力与半导体分析师' },
 };
 
 function appendTop20Appendix(markdown, top20, peopleStats) {
@@ -780,11 +852,6 @@ function normalizeMarkdownLayout(markdown) {
 
   // Remove 动态 entries (dash-prefixed lines under 相关动态) that have no source link
   text = stripSourcelessDynamic(text);
-
-  if (!/##\s*Today's Summary/i.test(text)) {
-    console.warn('Warning: Gemini output missing "Today\'s Summary" section, appending generic fallback.');
-    text += "\n\n## Today's Summary\n\n今日高热度集中在AI能力落地与产品化推进，头部公司密集发布与资本动作叠加放大了市场关注，建议管理层优先布局组织级部署、成本治理与执行效率。";
-  }
 
   return `${text}\n`;
 }
