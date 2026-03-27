@@ -1315,12 +1315,230 @@ async function sendEmail(reportMarkdown) {
   });
 }
 
-// Cross-validate report against Chinese tech media (量子位, 机器之心, 新智元)
-// Fetches recent articles via web search and asks Gemini to compare coverage
+function parseDateLoose(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (!Number.isNaN(parsed.getTime())) return parsed;
+  const normalized = String(value).replace(/年|\/|\./g, '-').replace(/月/g, '-').replace(/日/g, '').trim();
+  const parsedNormalized = new Date(normalized);
+  if (!Number.isNaN(parsedNormalized.getTime())) return parsedNormalized;
+  return null;
+}
+
+function isWithinDays(date, days) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return false;
+  const now = Date.now();
+  return now - date.getTime() <= days * 24 * 60 * 60 * 1000;
+}
+
+function stripHtmlTags(text) {
+  return String(text || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function decodeXmlEntities(text) {
+  return String(text || '')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .trim();
+}
+
+async function fetchTextWithTimeout(url, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; AI-Pulse-DailyBrief/1.0)',
+        Accept: 'text/html,application/xml,text/xml,application/rss+xml,application/atom+xml;q=0.9,*/*;q=0.8',
+      },
+    });
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return await response.text();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchTextWithFallback(url, timeoutMs = 15000) {
+  try {
+    return await fetchTextWithTimeout(url, timeoutMs);
+  } catch (err) {
+    const useJinaFallback = parseBooleanEnv(process.env.CROSS_VALIDATE_USE_JINA, true);
+    if (!useJinaFallback) throw err;
+    const jinaUrl = `https://r.jina.ai/http://${String(url).replace(/^https?:\/\//i, '')}`;
+    return fetchTextWithTimeout(jinaUrl, timeoutMs);
+  }
+}
+
+const TWITTER_NEWS_HINTS = ['twitter', 'x.com', 'tweet', 'tweets', '推特', '马斯克', '转帖', '转推', '发帖', '@'];
+
+function isTwitterRelatedArticle(article) {
+  const haystack = `${article?.title || ''} ${article?.description || ''}`.toLowerCase();
+  return TWITTER_NEWS_HINTS.some((kw) => haystack.includes(kw.toLowerCase()));
+}
+
+function normalizeWeChatUrl(url) {
+  try {
+    const u = new URL(url);
+    if (!/mp\.weixin\.qq\.com$/i.test(u.hostname)) return '';
+    if (!u.pathname.startsWith('/s')) return '';
+    const keep = new URLSearchParams();
+    ['__biz', 'mid', 'idx', 'sn', 'scene'].forEach((k) => {
+      const v = u.searchParams.get(k);
+      if (v) keep.set(k, v);
+    });
+    u.search = keep.toString();
+    return u.toString();
+  } catch {
+    return '';
+  }
+}
+
+function extractWeChatArticleUrls(text) {
+  const urls = String(text || '').match(/https?:\/\/mp\.weixin\.qq\.com\/s\?[^\s<>"')]+/gi) || [];
+  return Array.from(new Set(urls.map(normalizeWeChatUrl).filter(Boolean)));
+}
+
+function parseWeChatArticleMeta(html, url, expectedMediaName) {
+  const title = decodeXmlEntities(
+    html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
+    || html.match(/<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
+    || html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]
+    || '',
+  );
+
+  const accountName = decodeXmlEntities(
+    html.match(/<meta[^>]+property=["']og:article:author["'][^>]+content=["']([^"']+)["']/i)?.[1]
+    || html.match(/var\s+nickname\s*=\s*htmlDecode\("([^"]+)"\)/i)?.[1]
+    || html.match(/var\s+nickname\s*=\s*"([^"]+)"/i)?.[1]
+    || '',
+  );
+
+  const publishedText = decodeXmlEntities(
+    html.match(/<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"']+)["']/i)?.[1]
+    || html.match(/var\s+publish_time\s*=\s*"([^"]+)"/i)?.[1]
+    || '',
+  );
+
+  const epochMatch = html.match(/var\s+ct\s*=\s*"?(?<ts>\d{10})"?/i);
+  const epochDate = epochMatch?.groups?.ts ? new Date(Number(epochMatch.groups.ts) * 1000) : null;
+  const publishedAtDate = epochDate && !Number.isNaN(epochDate.getTime()) ? epochDate : parseDateLoose(publishedText);
+
+  const description = stripHtmlTags(
+    decodeXmlEntities(
+      html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || '',
+    ),
+  ).slice(0, 500);
+
+  if (!title) return null;
+  if (!accountName || !accountName.includes(expectedMediaName)) return null;
+
+  return {
+    media: expectedMediaName,
+    title,
+    link: url,
+    publishedAt: publishedAtDate ? publishedAtDate.toISOString() : null,
+    description,
+    source: 'wechat',
+    accountName,
+  };
+}
+
+async function fetchRecentMediaArticles() {
+  const targetMedia = ['量子位', '机器之心', '新智元'];
+  const candidateUrls = new Map();
+
+  for (const mediaName of targetMedia) {
+    const searchQueries = [
+      `${mediaName} 推特`,
+      `${mediaName} Twitter X`,
+      `${mediaName} AI`,
+    ];
+    for (const q of searchQueries) {
+      const sogouUrl = `https://weixin.sogou.com/weixin?type=2&query=${encodeURIComponent(q)}`;
+      const bingUrl = `https://cn.bing.com/search?q=${encodeURIComponent(`site:mp.weixin.qq.com "${mediaName}" ${q}`)}`;
+      for (const searchUrl of [sogouUrl, bingUrl]) {
+        try {
+          const page = await fetchTextWithFallback(searchUrl, 15000);
+          const links = extractWeChatArticleUrls(page);
+          if (!candidateUrls.has(mediaName)) candidateUrls.set(mediaName, new Set());
+          links.forEach((u) => candidateUrls.get(mediaName).add(u));
+        } catch (err) {
+          console.warn(`Search fetch failed for ${mediaName} (${searchUrl}): ${err.message}`);
+        }
+      }
+    }
+  }
+
+  const allArticles = [];
+  for (const mediaName of targetMedia) {
+    const urls = Array.from(candidateUrls.get(mediaName) || []).slice(0, 12);
+    for (const url of urls) {
+      try {
+        const html = await fetchTextWithFallback(url, 15000);
+        const article = parseWeChatArticleMeta(html, url, mediaName);
+        if (!article) continue;
+        allArticles.push(article);
+      } catch (err) {
+        console.warn(`Article fetch failed for ${mediaName} (${url}): ${err.message}`);
+      }
+    }
+  }
+
+  const deduped = [];
+  const seen = new Set();
+  for (const article of allArticles) {
+    const key = `${article.media}::${article.link}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(article);
+  }
+
+  const recent = deduped
+    .filter((a) => !a.publishedAt || isWithinDays(parseDateLoose(a.publishedAt), 2))
+    .sort((a, b) => new Date(b.publishedAt || 0).getTime() - new Date(a.publishedAt || 0).getTime());
+
+  const twitterRelated = recent.filter(isTwitterRelatedArticle);
+  return {
+    recentArticles: recent.slice(0, 30),
+    twitterArticles: twitterRelated.slice(0, 15),
+  };
+}
+
+// Cross-validate report against three specific WeChat public accounts:
+// 量子位, 机器之心, 新智元
 async function crossValidateWithMedia({ apiKey, model, reportMarkdown }) {
   console.log('Starting cross-validation with Chinese AI media...');
 
   const mediaNames = ['量子位', '机器之心', '新智元'];
+  const { recentArticles, twitterArticles } = await fetchRecentMediaArticles();
+  const selectedArticles = twitterArticles.length > 0 ? twitterArticles : recentArticles;
+  const articleLines = selectedArticles.map((a, idx) => {
+    const when = a.publishedAt ? a.publishedAt.slice(0, 10) : '未知日期';
+    return `${idx + 1}. [${a.media}] ${a.title}（${when}）\n   链接: ${a.link}\n   摘要: ${a.description || '无摘要'}`;
+  });
+
+  await fs.mkdir('artifacts', { recursive: true });
+  await fs.writeFile(
+    'artifacts/media-cross-validation-sources.json',
+    JSON.stringify({ generatedAt: new Date().toISOString(), recentArticles, twitterArticles }, null, 2),
+    'utf8',
+  );
 
   const crossValidationPrompt = `你是一个AI行业分析师，负责对比验证日报的覆盖质量。
 
@@ -1329,7 +1547,10 @@ async function crossValidateWithMedia({ apiKey, model, reportMarkdown }) {
 ${reportMarkdown.slice(0, 6000)}
 ---
 
-请你根据自己对近两天AI行业动态的了解，模拟"${mediaNames.join('、')}"这三个国内顶级AI公众号的视角来交叉验证：
+以下是从"${mediaNames.join('、')}"公开站点实时抓取到的最近两天文章（优先Twitter/X相关新闻）：
+${articleLines.length > 0 ? articleLines.join('\n') : '未抓取到可用外部文章，请明确指出“外部数据缺失”。'}
+
+请你必须基于上面“实时抓取文章”来交叉验证日报（不要仅凭常识）：
 
 1. **覆盖盲区**：这三家公众号近两天可能会重点报道、但我们日报中可能遗漏的重大事件有哪些？（只列真实可能发生的事件，不要编造）
 2. **权重偏差**：我们日报中某些事件的重要性是否被高估或低估了？从国内视角看，哪些事件对中国AI从业者更重要？

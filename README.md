@@ -81,6 +81,7 @@ compositeScore = outputCount + interactionScore × 2
 | `top20-action-sheet.md / .csv` | TOP20 人物全量 Action Sheet，按 topic 聚类，日报是其子集 |
 | `ai-weekly-output-counts.md / .csv` | 全员近 7 天动态数量排名（含互动分） |
 | `iteration-log.md` | 交叉验证历史记录，按日期累积 |
+| `media-cross-validation-sources.json` | 交叉验证抓取到的微信公众号文章（仅量子位/机器之心/新智元，近2天，优先 Twitter/X 相关新闻） |
 | `top20-ranking.json` | TOP20 排名原始数据 |
 
 ## 自迭代机制
@@ -130,6 +131,7 @@ compositeScore = outputCount + interactionScore × 2
 | `MAIL_FROM` | 是 | 发件人 |
 | `MAIL_TO` | 是 | 收件人 |
 | `MAIL_SUBJECT` | 否 | 邮件主题 |
+| `CROSS_VALIDATE_USE_JINA` | 否 | 交叉验证抓取失败时是否启用 `r.jina.ai` 回源兜底（默认 true） |
 
 ## 项目结构
 
