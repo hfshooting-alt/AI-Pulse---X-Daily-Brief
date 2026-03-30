@@ -330,6 +330,69 @@ function extractTextFromItem(item) {
     .join(' \n ');
 }
 
+function extractCreatedAtFromItem(item) {
+  const raw = item?.createdAt || item?.created_at || item?.date || item?.time || '';
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+function toBjtDateString(dateObj) {
+  const bjtMs = dateObj.getTime() + 8 * 60 * 60 * 1000;
+  const bjt = new Date(bjtMs);
+  return `${bjt.getUTCFullYear()}-${String(bjt.getUTCMonth() + 1).padStart(2, '0')}-${String(bjt.getUTCDate()).padStart(2, '0')}`;
+}
+
+function extractItemBjtDate(item) {
+  const createdAt = extractCreatedAtFromItem(item);
+  if (!createdAt) return '';
+  const parsed = parseDateLoose(createdAt);
+  if (!parsed || Number.isNaN(parsed.getTime())) return '';
+  return toBjtDateString(parsed);
+}
+
+function isDateInHalfOpenRange(dateStr, startInclusive, endExclusive) {
+  if (!dateStr) return false;
+  return dateStr >= startInclusive && dateStr < endExclusive;
+}
+
+function getItemUniqueKey(item) {
+  const id = String(item?.id || item?.id_str || item?.tweetId || '').trim();
+  if (id) return `id:${id}`;
+  const url = String(item?.url || item?.tweetUrl || item?.link || '').trim();
+  if (url) return `url:${url}`;
+  const handle = extractHandleFromItem(item) || 'unknown';
+  const createdAt = extractCreatedAtFromItem(item) || 'no-date';
+  const text = extractTextFromItem(item).replace(/\s+/g, ' ').trim().slice(0, 80);
+  return `fallback:${handle}:${createdAt}:${text}`;
+}
+
+function mergeUniqueItems(...groups) {
+  const map = new Map();
+  for (const group of groups) {
+    for (const item of group || []) {
+      const key = getItemUniqueKey(item);
+      if (!map.has(key)) map.set(key, item);
+    }
+  }
+  return Array.from(map.values());
+}
+
+function selectDailyItemsFromWeekly({ weeklyItems, top20Handles, dailySince, dailyUntil }) {
+  const handleSet = new Set(top20Handles.map((h) => normalizeHandle(h)));
+  return (weeklyItems || []).filter((item) => {
+    const handle = normalizeHandle(extractHandleFromItem(item));
+    if (!handle || !handleSet.has(handle)) return false;
+    const bjtDate = extractItemBjtDate(item);
+    return isDateInHalfOpenRange(bjtDate, dailySince, dailyUntil);
+  });
+}
+
+function shouldSkipSecondDailyFetch({ candidateItems, top20, maxMissingHandles, minItems }) {
+  if (!Array.isArray(candidateItems) || candidateItems.length < minItems) return false;
+  const activeHandles = new Set(candidateItems.map((item) => normalizeHandle(extractHandleFromItem(item))).filter(Boolean));
+  const missing = top20.filter((p) => !activeHandles.has(normalizeHandle(p.handle))).length;
+  return missing <= maxMissingHandles;
+}
+
 function isAiRelatedItem(item) {
   const text = extractTextFromItem(item);
   if (!text) return false;
@@ -878,8 +941,8 @@ function stripSourcelessDynamic(text) {
       continue;
     }
 
-    // If we're in a dynamic block and hit a dash-prefixed line, check for source
-    if (inDynamicBlock && /^[-•*]\s+/.test(trimmed)) {
+    // If we're in a dynamic block and hit a list item (bullet/numbered), check for source
+    if (inDynamicBlock && /^([-•*]\s+|\d+[.)、]\s+)/.test(trimmed)) {
       // Check if this line contains a source link pattern [@...](url)
       if (/\[@[^\]]+\]\(https?:\/\/[^)]+\)/.test(trimmed)) {
         result.push(line);
@@ -890,8 +953,8 @@ function stripSourcelessDynamic(text) {
       continue;
     }
 
-    // If we hit a non-dash, non-empty line while in dynamic block, leave the block
-    if (inDynamicBlock && trimmed !== '' && !/^[-•*]\s+/.test(trimmed)) {
+    // If we hit a non-list, non-empty line while in dynamic block, leave the block
+    if (inDynamicBlock && trimmed !== '' && !/^([-•*]\s+|\d+[.)、]\s+)/.test(trimmed)) {
       inDynamicBlock = false;
     }
 
@@ -957,7 +1020,8 @@ function markdownToStyledHtml(markdown) {
   // Track ## section headers from Gemini output to preserve its topic grouping
   let currentSectionTitle = '';
 
-  for (const line of contentLines) {
+  for (let lineIndex = 0; lineIndex < contentLines.length; lineIndex += 1) {
+    const line = contentLines[lineIndex];
     if (/^##\s*TOP20活跃人物/i.test(line)) {
       if (currentEvent) {
         events.push(currentEvent);
@@ -1014,7 +1078,7 @@ function markdownToStyledHtml(markdown) {
           if (currentEvent) { events.push(currentEvent); currentEvent = null; }
           inRelatedDynamicBlock = false;
           // Collect remaining lines as summary until end or next ## section
-          let k = contentLines.indexOf(line) + 1;
+          let k = lineIndex + 1;
         while (k < contentLines.length && !/^##\s+/.test(contentLines[k])) {
           const sl = contentLines[k].replace(/^[○■*-]\s+/, '').trim();
           if (sl) summaryLines.push(sl);
@@ -1565,9 +1629,24 @@ async function sendEmail(reportMarkdown) {
 
 function parseDateLoose(value) {
   if (!value) return null;
+  const asNumber = Number(String(value).trim());
+  if (Number.isFinite(asNumber)) {
+    // Support unix seconds / milliseconds timestamps
+    const ms = asNumber > 1e12 ? asNumber : asNumber > 1e9 ? asNumber * 1000 : NaN;
+    if (Number.isFinite(ms)) {
+      const d = new Date(ms);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+  }
   const parsed = new Date(value);
   if (!Number.isNaN(parsed.getTime())) return parsed;
   const normalized = String(value).replace(/年|\/|\./g, '-').replace(/月/g, '-').replace(/日/g, '').trim();
+  // If timestamp has no timezone info, assume UTC to avoid host-locale drift.
+  const maybeNoTimezone = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(normalized)
+    ? `${normalized.replace(' ', 'T')}Z`
+    : normalized;
+  const parsedNoTz = new Date(maybeNoTimezone);
+  if (!Number.isNaN(parsedNoTz.getTime())) return parsedNoTz;
   const parsedNormalized = new Date(normalized);
   if (!Number.isNaN(parsedNormalized.getTime())) return parsedNormalized;
   return null;
@@ -1958,13 +2037,38 @@ async function main() {
   // For better precision, filter by item.createdAt timestamp after fetching.
   const dailyInput = buildApifyInput(templateInput, top20.map((p) => p.handle), yesterday, today, 1000);
   if (top20.length > 0) console.log(`Example daily searchTerm: from:${top20[0].handle} since:${yesterday} until:${today}`);
-  const daily = await runApify(dailyInput);
-  const aiRelatedDaily = daily.items.filter(isAiRelatedItem);
-  console.log(`Daily items: ${daily.items.length}, AI-related: ${aiRelatedDaily.length}`);
+  const dailyFromWeekly = selectDailyItemsFromWeekly({
+    weeklyItems,
+    top20Handles: top20.map((p) => p.handle),
+    dailySince: yesterday,
+    dailyUntil: today,
+  });
+  const enableSkipSecondFetch = parseBooleanEnv(process.env.APIFY_SKIP_SECOND_FETCH_IF_SUFFICIENT, true);
+  const dailyMinItems = Number(process.env.APIFY_DAILY_MIN_ITEMS || 80);
+  const maxMissingHandles = Number(process.env.APIFY_DAILY_MAX_MISSING_TOP20 || 8);
+  const enoughByWeekly = shouldSkipSecondDailyFetch({
+    candidateItems: dailyFromWeekly,
+    top20,
+    maxMissingHandles: Number.isFinite(maxMissingHandles) ? Math.max(0, Math.floor(maxMissingHandles)) : 8,
+    minItems: Number.isFinite(dailyMinItems) ? Math.max(1, Math.floor(dailyMinItems)) : 80,
+  });
+
+  let dailyItems;
+  if (enableSkipSecondFetch && enoughByWeekly) {
+    dailyItems = dailyFromWeekly;
+    console.log(`Daily fetch skipped: reused weekly subset (${dailyItems.length} items, top20=${top20.length})`);
+  } else {
+    const daily = await runApify(dailyInput);
+    dailyItems = mergeUniqueItems(dailyFromWeekly, daily.items);
+    console.log(`Daily fetched via Apify and merged: weeklySubset=${dailyFromWeekly.length}, fetched=${daily.items.length}, merged=${dailyItems.length}`);
+  }
+
+  const aiRelatedDaily = dailyItems.filter(isAiRelatedItem);
+  console.log(`Daily items: ${dailyItems.length}, AI-related: ${aiRelatedDaily.length}`);
 
   // Generate full action sheet (ALL daily items from TOP20, grouped by topic)
   // This runs independently and doesn't affect the daily report pipeline
-  await generateActionSheet(daily.items, top20);
+  await generateActionSheet(dailyItems, top20);
 
   const hotspotStats = getHotspotStats(aiRelatedDaily);
   const dailyPeopleStats = getDailyPeopleStats(aiRelatedDaily);

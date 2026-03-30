@@ -134,6 +134,9 @@ compositeScore = outputCount + interactionScore × 2
 | `APIFY_REUSE_RECENT_RUNS` | 否 | 是否优先复用最近成功 run 的 dataset（默认 true） |
 | `APIFY_REUSE_RUNS_LIMIT` | 否 | 复用检查的最近 run 数量（默认 10，最大 50） |
 | `APIFY_REUSE_MAX_AGE_HOURS` | 否 | 仅复用最近 N 小时内的 run（默认 36 小时） |
+| `APIFY_SKIP_SECOND_FETCH_IF_SUFFICIENT` | 否 | 当 weekly 数据已足够覆盖 TOP20 的日窗口时，跳过第二次 Apify 抓取（默认 true） |
+| `APIFY_DAILY_MIN_ITEMS` | 否 | 判断 weekly 子集“足够”时的最小日动态数量阈值（默认 80） |
+| `APIFY_DAILY_MAX_MISSING_TOP20` | 否 | 判断 weekly 子集“足够”时允许缺失动态的 TOP20 人数上限（默认 8） |
 | `CROSS_VALIDATE_USE_JINA` | 否 | 交叉验证抓取失败时是否启用 `r.jina.ai` 回源兜底（默认 true） |
 
 ## 项目结构
