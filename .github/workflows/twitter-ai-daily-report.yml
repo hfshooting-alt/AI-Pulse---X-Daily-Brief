@@ -67,5 +67,6 @@ jobs:
             AI日报/artifacts/ai-weekly-output-counts.md
             AI日报/artifacts/ai-weekly-output-counts.csv
             AI日报/artifacts/iteration-log.md
+            AI日报/artifacts/media-cross-validation-sources.json
             AI日报/artifacts/top20-action-sheet.md
             AI日报/artifacts/top20-action-sheet.csv
