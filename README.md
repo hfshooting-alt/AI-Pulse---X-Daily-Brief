@@ -81,6 +81,7 @@ compositeScore = outputCount + interactionScore × 2
 | `top20-action-sheet.md / .csv` | TOP20 人物全量 Action Sheet，按 topic 聚类，日报是其子集 |
 | `ai-weekly-output-counts.md / .csv` | 全员近 7 天动态数量排名（含互动分） |
 | `iteration-log.md` | 交叉验证历史记录，按日期累积 |
+| `media-cross-validation-sources.json` | 交叉验证抓取到的微信公众号文章（仅量子位/机器之心/新智元，近2天，优先 Twitter/X 相关新闻） |
 | `top20-ranking.json` | TOP20 排名原始数据 |
 
 ## 自迭代机制
@@ -123,6 +124,7 @@ compositeScore = outputCount + interactionScore × 2
 | `GEMINI_MAX_OUTPUT_TOKENS` | 否 | 最大输出 token（默认 65536） |
 | `GEMINI_TEMPERATURE` | 否 | 温度参数（默认 1.0） |
 | `GEMINI_THINKING_LEVEL` | 否 | 思考深度 minimal / low / medium / high |
+| `GEMINI_RETRY_WEAK_STRUCTURE` | 否 | 当日报结构过弱（TOP3/中热度/链接不足）时是否自动重试一次 Gemini（默认 true） |
 | `SMTP_HOST` | 是 | SMTP 服务器 |
 | `SMTP_PORT` | 是 | SMTP 端口 |
 | `SMTP_USER` | 是 | SMTP 用户名 |
@@ -130,6 +132,15 @@ compositeScore = outputCount + interactionScore × 2
 | `MAIL_FROM` | 是 | 发件人 |
 | `MAIL_TO` | 是 | 收件人 |
 | `MAIL_SUBJECT` | 否 | 邮件主题 |
+| `APIFY_REUSE_RECENT_RUNS` | 否 | 是否优先复用最近成功 run 的 dataset（默认 true） |
+| `APIFY_REUSE_RUNS_LIMIT` | 否 | 复用检查的最近 run 数量（默认 10，最大 50） |
+| `APIFY_REUSE_MAX_AGE_HOURS` | 否 | 仅复用最近 N 小时内的 run（默认 36 小时） |
+| `APIFY_SKIP_SECOND_FETCH_IF_SUFFICIENT` | 否 | 当 weekly 数据已足够覆盖 TOP20 的日窗口时，跳过第二次 Apify 抓取（默认 true） |
+| `APIFY_DAILY_MIN_ITEMS` | 否 | 判断 weekly 子集“足够”时的最小日动态数量阈值（默认 80） |
+| `APIFY_DAILY_MAX_MISSING_TOP20` | 否 | 判断 weekly 子集“足够”时允许缺失动态的 TOP20 人数上限（默认 8） |
+| `APIFY_DAILY_MIN_AI_ITEMS` | 否 | 跳过第二次抓取前，weekly 子集里最少 AI 相关动态数（默认 30） |
+| `APIFY_DAILY_MIN_AI_HANDLES` | 否 | 跳过第二次抓取前，weekly 子集里最少有 AI 动态的 TOP20 账号数（默认 8） |
+| `CROSS_VALIDATE_USE_JINA` | 否 | 交叉验证抓取失败时是否启用 `r.jina.ai` 回源兜底（默认 true） |
 
 ## 项目结构
 

@@ -185,6 +185,132 @@ async function fetchApifyDatasetItems(params) {
   return withRetry(() => fetchApifyDatasetItemsOnce(params), { label: 'Apify fetch', retries: 3, baseDelayMs: 3000 });
 }
 
+async function fetchJsonWithRetry(url, { label, timeoutMs = 60_000 } = {}) {
+  return withRetry(async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      const text = await response.text();
+      if (!response.ok) throw new Error(`${label || 'request'} failed: ${response.status} ${text.slice(0, 500)}`);
+      return text ? JSON.parse(text) : {};
+    } finally {
+      clearTimeout(timeout);
+    }
+  }, { label: label || 'HTTP JSON fetch', retries: 2, baseDelayMs: 2000 });
+}
+
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v)).join(',')}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+}
+
+function normalizeApifyInputForFingerprint(input) {
+  const clone = input && typeof input === 'object' ? { ...input } : {};
+  // searchTerms order shouldn't affect cache hit
+  if (Array.isArray(clone.searchTerms)) {
+    clone.searchTerms = clone.searchTerms.map((v) => String(v).trim()).filter(Boolean).sort();
+  }
+  return clone;
+}
+
+function getInputFingerprint(input) {
+  return stableStringify(normalizeApifyInputForFingerprint(input));
+}
+
+async function fetchRunInput({ token, runId }) {
+  const url = new URL(`https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}/key-value-store/records/INPUT`);
+  url.searchParams.set('token', token);
+  return fetchJsonWithRetry(url, { label: `Apify run INPUT ${runId}` });
+}
+
+async function fetchDatasetItemsById({ token, datasetId }) {
+  const url = new URL(`https://api.apify.com/v2/datasets/${encodeURIComponent(datasetId)}/items`);
+  url.searchParams.set('token', token);
+  url.searchParams.set('clean', 'true');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10 * 60 * 1000);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    const body = await response.text();
+    if (!response.ok) throw new Error(`Dataset items fetch failed: ${response.status} ${body.slice(0, 500)}`);
+    const parsed = JSON.parse(body);
+    if (!Array.isArray(parsed)) throw new Error('Dataset items response is not an array.');
+    return parsed;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function listRecentActorRuns({ token, actorId, limit = 10 }) {
+  const runsUrl = new URL(`https://api.apify.com/v2/acts/${encodeURIComponent(normalizeActorId(actorId))}/runs`);
+  runsUrl.searchParams.set('token', token);
+  runsUrl.searchParams.set('limit', String(limit));
+  runsUrl.searchParams.set('desc', '1');
+  runsUrl.searchParams.set('status', 'SUCCEEDED');
+  const data = await fetchJsonWithRetry(runsUrl, { label: 'Apify recent runs list' });
+  return Array.isArray(data?.data?.items) ? data.data.items : [];
+}
+
+function shouldReuseRecentRuns() {
+  return parseBooleanEnv(process.env.APIFY_REUSE_RECENT_RUNS, true);
+}
+
+function getRecentRunsLimit() {
+  const v = Number(process.env.APIFY_REUSE_RUNS_LIMIT || 10);
+  return Number.isFinite(v) && v > 0 ? Math.min(Math.floor(v), 50) : 10;
+}
+
+function getReuseMaxAgeHours() {
+  const v = Number(process.env.APIFY_REUSE_MAX_AGE_HOURS || 36);
+  return Number.isFinite(v) && v > 0 ? Math.min(v, 24 * 14) : 36;
+}
+
+function isRunFreshEnough(run, maxAgeHours) {
+  const startedAt = run?.startedAt || run?.started_at || run?.createdAt || run?.created_at;
+  if (!startedAt) return false;
+  const startedAtMs = new Date(startedAt).getTime();
+  if (!Number.isFinite(startedAtMs)) return false;
+  const ageMs = Date.now() - startedAtMs;
+  return ageMs >= 0 && ageMs <= maxAgeHours * 60 * 60 * 1000;
+}
+
+const inProcessApifyCache = new Map();
+
+async function tryReuseRecentRun({ token, actorId, input }) {
+  if (!shouldReuseRecentRuns()) return null;
+  const limit = getRecentRunsLimit();
+  const maxAgeHours = getReuseMaxAgeHours();
+  const expectedFingerprint = getInputFingerprint(input);
+  const recentRuns = await listRecentActorRuns({ token, actorId, limit });
+  if (recentRuns.length === 0) return null;
+  let freshRuns = 0;
+  let fingerprintMatches = 0;
+
+  for (const run of recentRuns) {
+    const runId = String(run?.id || '').trim();
+    const datasetId = String(run?.defaultDatasetId || run?.defaultDataset || run?.datasetId || '').trim();
+    if (!runId || !datasetId) continue;
+    if (!isRunFreshEnough(run, maxAgeHours)) continue;
+    freshRuns += 1;
+    try {
+      const runInput = await fetchRunInput({ token, runId });
+      const fingerprint = getInputFingerprint(runInput);
+      if (fingerprint !== expectedFingerprint) continue;
+      fingerprintMatches += 1;
+      const items = await fetchDatasetItemsById({ token, datasetId });
+      console.log(`Apify cache hit: reused run ${runId} (dataset ${datasetId}, items=${items.length})`);
+      return { items, runData: run, datasetId, reused: true };
+    } catch (err) {
+      console.warn(`Apify reuse candidate skipped (${runId}): ${err.message}`);
+    }
+  }
+  console.log(`Apify reuse miss: checked=${recentRuns.length}, fresh=${freshRuns}, fingerprintMatched=${fingerprintMatches}`);
+  return null;
+}
+
 function extractHandleFromItem(item) {
   const keys = [
     item?.author?.userName,
@@ -207,6 +333,82 @@ function extractTextFromItem(item) {
   return [item?.text, item?.fullText, item?.full_text, item?.tweetText, item?.title]
     .filter((v) => typeof v === 'string' && v.trim())
     .join(' \n ');
+}
+
+function extractCreatedAtFromItem(item) {
+  const raw = item?.createdAt || item?.created_at || item?.date || item?.time || '';
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+function toBjtDateString(dateObj) {
+  const bjtMs = dateObj.getTime() + 8 * 60 * 60 * 1000;
+  const bjt = new Date(bjtMs);
+  return `${bjt.getUTCFullYear()}-${String(bjt.getUTCMonth() + 1).padStart(2, '0')}-${String(bjt.getUTCDate()).padStart(2, '0')}`;
+}
+
+function extractItemBjtDate(item) {
+  const createdAt = extractCreatedAtFromItem(item);
+  if (!createdAt) return '';
+  const parsed = parseDateLoose(createdAt);
+  if (!parsed || Number.isNaN(parsed.getTime())) return '';
+  return toBjtDateString(parsed);
+}
+
+function isDateInHalfOpenRange(dateStr, startInclusive, endExclusive) {
+  if (!dateStr) return false;
+  return dateStr >= startInclusive && dateStr < endExclusive;
+}
+
+function getItemUniqueKey(item) {
+  const id = String(item?.id || item?.id_str || item?.tweetId || '').trim();
+  if (id) return `id:${id}`;
+  const url = String(item?.url || item?.tweetUrl || item?.link || '').trim();
+  if (url) return `url:${url}`;
+  const handle = extractHandleFromItem(item) || 'unknown';
+  const createdAt = extractCreatedAtFromItem(item) || 'no-date';
+  const text = extractTextFromItem(item).replace(/\s+/g, ' ').trim().slice(0, 80);
+  return `fallback:${handle}:${createdAt}:${text}`;
+}
+
+function mergeUniqueItems(...groups) {
+  const map = new Map();
+  for (const group of groups) {
+    for (const item of group || []) {
+      const key = getItemUniqueKey(item);
+      if (!map.has(key)) map.set(key, item);
+    }
+  }
+  return Array.from(map.values());
+}
+
+function selectDailyItemsFromWeekly({ weeklyItems, top20Handles, dailySince, dailyUntil }) {
+  const handleSet = new Set(top20Handles.map((h) => normalizeHandle(h)));
+  return (weeklyItems || []).filter((item) => {
+    const handle = normalizeHandle(extractHandleFromItem(item));
+    if (!handle || !handleSet.has(handle)) return false;
+    const bjtDate = extractItemBjtDate(item);
+    return isDateInHalfOpenRange(bjtDate, dailySince, dailyUntil);
+  });
+}
+
+function filterItemsByBjtDateRange(items, startInclusive, endExclusive) {
+  return (items || []).filter((item) => {
+    const bjtDate = extractItemBjtDate(item);
+    return isDateInHalfOpenRange(bjtDate, startInclusive, endExclusive);
+  });
+}
+
+function shouldSkipSecondDailyFetch({ candidateItems, top20, maxMissingHandles, minItems }) {
+  if (!Array.isArray(candidateItems) || candidateItems.length < minItems) return false;
+  const activeHandles = new Set(candidateItems.map((item) => normalizeHandle(extractHandleFromItem(item))).filter(Boolean));
+  const missing = top20.filter((p) => !activeHandles.has(normalizeHandle(p.handle))).length;
+  return missing <= maxMissingHandles;
+}
+
+function getDailyAiCoverage(items) {
+  const aiItems = (items || []).filter(isAiRelatedItem);
+  const aiHandles = new Set(aiItems.map((item) => normalizeHandle(extractHandleFromItem(item))).filter(Boolean));
+  return { aiItems, aiCount: aiItems.length, aiHandleCount: aiHandles.size };
 }
 
 function isAiRelatedItem(item) {
@@ -678,22 +880,26 @@ function stripSourcelessDynamic(text) {
   const result = [];
   let inDynamicBlock = false;
   let strippedCount = 0;
+  let dynamicListCount = 0;
+  let keptWithSourceCount = 0;
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     const trimmed = line.trim();
 
     // Detect start of 相关动态 block
-    if (/\*\*相关动态[：:]?\*\*/.test(trimmed)) {
+    if (/\*\*相关动态[：:]?\*\*/.test(trimmed) || /^相关动态[：:]?$/.test(trimmed)) {
       inDynamicBlock = true;
       result.push(line);
       continue;
     }
 
-    // If we're in a dynamic block and hit a dash-prefixed line, check for source
-    if (inDynamicBlock && /^[-•*]\s+/.test(trimmed)) {
+    // If we're in a dynamic block and hit a list item (bullet/numbered), check for source
+    if (inDynamicBlock && /^([-•*]\s+|\d+[.)、]\s+)/.test(trimmed)) {
+      dynamicListCount += 1;
       // Check if this line contains a source link pattern [@...](url)
       if (/\[@[^\]]+\]\(https?:\/\/[^)]+\)/.test(trimmed)) {
+        keptWithSourceCount += 1;
         result.push(line);
       } else {
         strippedCount += 1;
@@ -702,12 +908,21 @@ function stripSourcelessDynamic(text) {
       continue;
     }
 
-    // If we hit a non-dash, non-empty line while in dynamic block, leave the block
-    if (inDynamicBlock && trimmed !== '' && !/^[-•*]\s+/.test(trimmed)) {
+    // If we hit a non-list, non-empty line while in dynamic block, leave the block
+    if (inDynamicBlock && trimmed !== '' && !/^([-•*]\s+|\d+[.)、]\s+)/.test(trimmed)) {
       inDynamicBlock = false;
     }
 
     result.push(line);
+  }
+
+  // Safety valve: if strict stripping would wipe out essentially all dynamics,
+  // keep original text to avoid empty report cards in email.
+  if (dynamicListCount > 0 && keptWithSourceCount === 0 && strippedCount > 0) {
+    console.warn(
+      `stripSourcelessDynamic fallback: stripped=${strippedCount}, dynamicListCount=${dynamicListCount}, kept=${keptWithSourceCount}. Returning original markdown to avoid empty sections.`,
+    );
+    return text;
   }
 
   if (strippedCount > 0) {
@@ -762,17 +977,20 @@ function markdownToStyledHtml(markdown) {
 
   const events = [];
   let currentEvent = null;
+  let inRelatedDynamicBlock = false;
   const topSectionNotes = [];
   const appendixLines = [];
   let inAppendix = false;
   // Track ## section headers from Gemini output to preserve its topic grouping
   let currentSectionTitle = '';
 
-  for (const line of contentLines) {
+  for (let lineIndex = 0; lineIndex < contentLines.length; lineIndex += 1) {
+    const line = contentLines[lineIndex];
     if (/^##\s*TOP20活跃人物/i.test(line)) {
       if (currentEvent) {
         events.push(currentEvent);
         currentEvent = null;
+        inRelatedDynamicBlock = false;
       }
       inAppendix = true;
       continue;
@@ -789,6 +1007,7 @@ function markdownToStyledHtml(markdown) {
       if (currentEvent) {
         events.push(currentEvent);
         currentEvent = null;
+        inRelatedDynamicBlock = false;
       }
       currentSectionTitle = sectionMatch[1].replace(/^[一二三四五六七八九十\d]+[、.．]\s*/, '').trim();
       continue;
@@ -801,6 +1020,7 @@ function markdownToStyledHtml(markdown) {
       if (currentEvent) {
         events.push(currentEvent);
         currentEvent = null;
+        inRelatedDynamicBlock = false;
       }
       currentSectionTitle = h3Match[1].replace(/^[一二三四五六七八九十\d]+[、.．]\s*/, '').trim();
       continue;
@@ -810,13 +1030,17 @@ function markdownToStyledHtml(markdown) {
     // Also match bold standalone titles like "**事件标题**" (LLM sometimes uses this instead of numbered lists)
     const boldTitle = !ordered && line.match(/^\*\*([^*]+)\*\*\s*$/);
     if (ordered || boldTitle) {
+      if (currentEvent && inRelatedDynamicBlock && ordered) {
+        // While inside "相关动态", numbered lines are dynamic entries, not new events.
+      } else {
       const candidateTitle = ordered ? ordered[2] : boldTitle[1];
       // If this numbered item is actually "Today's Summary" / "今日总结", treat it as
       // the start of the summary section rather than an event item.
       if (/today'?s\s*summary|今日总结|executive\s*summary/i.test(candidateTitle)) {
-        if (currentEvent) { events.push(currentEvent); currentEvent = null; }
-        // Collect remaining lines as summary until end or next ## section
-        let k = contentLines.indexOf(line) + 1;
+          if (currentEvent) { events.push(currentEvent); currentEvent = null; }
+          inRelatedDynamicBlock = false;
+          // Collect remaining lines as summary until end or next ## section
+          let k = lineIndex + 1;
         while (k < contentLines.length && !/^##\s+/.test(contentLines[k])) {
           const sl = contentLines[k].replace(/^[○■*-]\s+/, '').trim();
           if (sl) summaryLines.push(sl);
@@ -825,6 +1049,7 @@ function markdownToStyledHtml(markdown) {
         break; // stop main loop; everything after is summary/appendix
       }
       if (currentEvent) events.push(currentEvent);
+      inRelatedDynamicBlock = false;
       currentEvent = {
         index: ordered ? Number(ordered[1]) : events.length + 1,
         title: candidateTitle,
@@ -835,6 +1060,7 @@ function markdownToStyledHtml(markdown) {
         sectionTitle: currentSectionTitle,
       };
       continue;
+      }
     }
 
     // If no current event but we have a section title and content, auto-create an
@@ -868,14 +1094,37 @@ function markdownToStyledHtml(markdown) {
       if (/参与人数|participantCount/i.test(plain)) continue;
 
       if (/热点解析[:：]/.test(plain)) {
+        inRelatedDynamicBlock = false;
         const value = plain.replace(/^热点解析[:：]\s*/, '').trim();
         if (value) currentEvent.analysis.push(value);
       } else if (/why it matters|管理层意义|业务影响|重要性/i.test(plain)) {
+        inRelatedDynamicBlock = false;
         const value = plain.replace(/^([^:：]+)[:：]\s*/, '').trim();
         if (value) currentEvent.why = value;
       } else if (/相关动态[:：]/.test(plain)) {
+        inRelatedDynamicBlock = true;
         const value = plain.replace(/^相关动态[:：]\s*/, '').trim();
         if (value) currentEvent.actions.push(value);
+      } else if (inRelatedDynamicBlock) {
+        // Accept richer dynamic list formats:
+        // - [@Name](url): ...
+        // 1. [@Name](url) ...
+        // 1) [@Name](url)：...
+        // [@Name](url) ...
+        const actionCandidate = plain
+          .replace(/^[-•*]\s+/, '')
+          .replace(/^\d+[.)、]\s+/, '')
+          .trim();
+        if (/^\[@[^\]]+\]\(https?:\/\/[^)]+\)/.test(actionCandidate)) {
+          currentEvent.actions.push(actionCandidate);
+          continue;
+        }
+        if (actionCandidate && /https?:\/\//.test(actionCandidate)) {
+          currentEvent.actions.push(actionCandidate);
+          continue;
+        }
+        // A non-link narrative line means we likely left the dynamic block.
+        inRelatedDynamicBlock = false;
       } else if (/^\[@[^\]]+\]\(https?:\/\/[^)]+\)\s*[:：]/.test(plain)) {
         // Dynamic entry with source link — treat as action content, not a bare source
         currentEvent.actions.push(plain);
@@ -893,6 +1142,7 @@ function markdownToStyledHtml(markdown) {
     }
   }
   if (currentEvent) events.push(currentEvent);
+  inRelatedDynamicBlock = false;
 
   // Split events by section title: events under the TOP3 header go into top3,
   // everything else goes into secondary.  This is more robust than a blind
@@ -913,6 +1163,13 @@ function markdownToStyledHtml(markdown) {
     secondary.length = 0;
     secondary.push(...events.slice(top3.length));
   }
+  if (top3.length < 3 && secondary.length > 0) {
+    const deficit = 3 - top3.length;
+    const borrowed = secondary.splice(0, deficit);
+    top3.push(...borrowed);
+    console.log(`Renderer adjusted top3 count: borrowed=${borrowed.length}, top3=${top3.length}, secondary=${secondary.length}`);
+  }
+  console.log(`Renderer parse stats: events=${events.length}, top3=${top3.length}, secondary=${secondary.length}`);
 
   // Group secondary events by Gemini's own ## section titles instead of re-classifying
   const grouped = new Map();
@@ -1170,8 +1427,32 @@ async function requestGeminiReport(params) {
 async function runApify(input) {
   const token = normalizeApifyToken(requireEnv('APIFY_TOKEN'));
   const actorId = requireEnv('APIFY_ACTOR_ID');
+  const fingerprint = getInputFingerprint(input);
+  const cacheMeta = {
+    reuseEnabled: shouldReuseRecentRuns(),
+    reuseLimit: getRecentRunsLimit(),
+    reuseMaxAgeHours: getReuseMaxAgeHours(),
+  };
+
+  if (inProcessApifyCache.has(fingerprint)) {
+    const cached = inProcessApifyCache.get(fingerprint);
+    console.log(`Apify in-process cache hit: items=${cached.items.length}`);
+    return { ...cached, reused: true };
+  }
+
+  if (cacheMeta.reuseEnabled) {
+    console.log(`Apify reuse check enabled (limit=${cacheMeta.reuseLimit}, maxAgeHours=${cacheMeta.reuseMaxAgeHours})`);
+  }
+  const reused = await tryReuseRecentRun({ token, actorId, input });
+  if (reused) {
+    inProcessApifyCache.set(fingerprint, reused);
+    return reused;
+  }
+
   const items = await fetchApifyDatasetItems({ token, actorId, input });
-  return { items, runData: { id: normalizeActorId(actorId), status: 'SUCCEEDED' }, datasetId: 'run-sync-output' };
+  const fresh = { items, runData: { id: normalizeActorId(actorId), status: 'SUCCEEDED' }, datasetId: 'run-sync-output', reused: false };
+  inProcessApifyCache.set(fingerprint, fresh);
+  return fresh;
 }
 
 // Split handles into batches and run Apify calls concurrently for faster fetching
@@ -1246,6 +1527,108 @@ async function loadPromptRules() {
   }
 }
 
+function extractSection(text, startPattern, endPattern) {
+  const source = String(text || '');
+  const startMatch = source.match(startPattern);
+  if (!startMatch) return '';
+  const startIdx = startMatch.index + startMatch[0].length;
+  const rest = source.slice(startIdx);
+  const endMatch = rest.match(endPattern);
+  return endMatch ? rest.slice(0, endMatch.index) : rest;
+}
+
+function analyzeReportStructure(markdown) {
+  const text = String(markdown || '').replace(/\r\n/g, '\n');
+  const top3Section = extractSection(text, /^##\s*TOP3[^\n]*\n?/im, /^##\s+/im);
+  const secondarySection = extractSection(text, /^##\s*中热度[^\n]*\n?/im, /^##\s*(TOP20活跃人物|Today's Summary)\b/im);
+  const top3EventCount = (top3Section.match(/^\d+\.\s+/gm) || []).length;
+  const secondaryEventCount = (secondarySection.match(/^\d+\.\s+/gm) || []).length;
+  const sourceLinkCount = (text.match(/\[@[^\]]+\]\(https?:\/\/[^)]+\)/g) || []).length;
+  return { top3EventCount, secondaryEventCount, sourceLinkCount };
+}
+
+function isStructureWeak(structure) {
+  return structure.top3EventCount < 3 || structure.secondaryEventCount < 4 || structure.sourceLinkCount < 10;
+}
+
+function buildFallbackReportFromItems(items, top20) {
+  console.log('fallback zh dynamic mode enabled');
+  const nameMap = new Map((top20 || []).map((p) => [normalizeHandle(p.handle), p.name || p.handle]));
+  const topicBuckets = new Map();
+  for (const item of items || []) {
+    const handle = normalizeHandle(extractHandleFromItem(item));
+    if (!handle) continue;
+    const text = extractTextFromItem(item).replace(/\s+/g, ' ').trim();
+    const url = item?.url || item?.tweetUrl || item?.link || '';
+    if (!text || !url) continue;
+    const topic = classifyHotspots(text)[0] || '其他AI动态';
+    if (!topicBuckets.has(topic)) topicBuckets.set(topic, []);
+    topicBuckets.get(topic).push({ handle, name: nameMap.get(handle) || handle, text: text.slice(0, 180), url });
+  }
+
+  const sortedTopics = Array.from(topicBuckets.entries())
+    .sort((a, b) => b[1].length - a[1].length);
+
+  const eventCandidates = [];
+  for (const [topic, entries] of sortedTopics) {
+    // Split each topic into chunks so one hot topic can still generate multiple events.
+    const chunkSize = 4;
+    for (let i = 0; i < entries.length; i += chunkSize) {
+      const chunk = entries.slice(i, i + chunkSize);
+      if (chunk.length === 0) continue;
+      const suffix = i === 0 ? '' : `（扩展${Math.floor(i / chunkSize) + 1}）`;
+      eventCandidates.push({ topic, title: `${topic}${suffix}`, entries: chunk, weight: chunk.length });
+    }
+  }
+  eventCandidates.sort((a, b) => b.weight - a.weight);
+
+  const buildEventBlock = (topic, entries, index) => {
+    const dynamics = entries
+      .slice(0, 4)
+      .map((e) => `     - [@${e.name}](${e.url}): 发布了与「${topic}」相关动态，详见原帖。`)
+      .join('\n');
+    return `${index}. ${topic} 相关信号持续升温
+   - **热点解析：** ${topic} 在今日监测样本中出现频率较高，涉及多位活跃账号，建议结合相关动态快速判断对业务的直接影响。
+   - **相关动态：**
+${dynamics}`;
+  };
+
+  const allEntries = sortedTopics.flatMap(([, entries]) => entries);
+  while (eventCandidates.length < 7 && allEntries.length > 0) {
+    const i = eventCandidates.length;
+    const slice = allEntries.slice((i * 3) % allEntries.length, ((i * 3) % allEntries.length) + 3);
+    const fallbackEntries = slice.length > 0 ? slice : allEntries.slice(0, 3);
+    eventCandidates.push({
+      topic: '其他AI动态',
+      title: `补充信号${i + 1}`,
+      entries: fallbackEntries,
+      weight: fallbackEntries.length,
+    });
+  }
+
+  const top3Candidates = eventCandidates.slice(0, 3);
+  const secondaryCandidates = eventCandidates.slice(3, 7);
+  const top3Sections = top3Candidates
+    .map((evt, i) => buildEventBlock(evt.title, evt.entries, i + 1))
+    .join('\n\n');
+  const secondarySections = secondaryCandidates
+    .map((evt, i) => (
+      `### ${evt.topic}\n\n${buildEventBlock(`${evt.title} 进展`, evt.entries, i + 1)}`
+    ))
+    .join('\n\n');
+
+  return `# AI Pulse - X Daily Brief
+
+## TOP3 热度事件
+
+${top3Sections || '1. 今日核心信号不足\n   - **热点解析：** 今日样本中可聚类信号有限，建议关注明日增量。\n   - **相关动态：**\n     - [@来源](https://x.com): 暂无可用来源。'}
+
+## 中热度话题
+
+${secondarySections || '### 其他观察\n\n1. 事件补充\n   - **热点解析：** 中热度事件不足，保留观察。\n   - **相关动态：**\n     - [@来源](https://x.com): 暂无可用来源。'}
+`;
+}
+
 async function generateReport(items, top20, stats, peopleStats) {
   if (!Array.isArray(items) || items.length === 0) {
     return `# AI Pulse - X Daily Brief\n\n今日无可用AI相关内容。\n`;
@@ -1272,10 +1655,49 @@ async function generateReport(items, top20, stats, peopleStats) {
   const promptRules = await loadPromptRules();
   const rulesSection = promptRules ? `\n\n## 额外规则（基于历史反馈，必须遵守）\n${promptRules}` : '';
   const prompt = `${getPromptTemplate()}${rulesSection}\n\n话题统计（宏观参考，已按participantCount降序排列）：\n${JSON.stringify(stats, null, 2)}\n\n去重后的原始动态（共${compactItems.length}条）。请你独立判断每条动态的具体主题，然后按主题相似性聚类为具体事件，再根据每个事件涉及的不同人数（participantCount）排序：\n${JSON.stringify(compactItems, null, 2)}`;
-  const markdown = await requestGeminiReport({ apiKey, model, prompt });
-  const normalized = normalizeMarkdownLayout(markdown);
-  const withRealNameLinks = relabelSourceLinksWithRealNames(normalized, top20);
-  const reportBody = appendTop20Appendix(withRealNameLinks, top20, peopleStats);
+  let markdown = await requestGeminiReport({ apiKey, model, prompt });
+  let normalized = normalizeMarkdownLayout(markdown);
+  let withRealNameLinks = relabelSourceLinksWithRealNames(normalized, top20);
+  let reportBody = appendTop20Appendix(withRealNameLinks, top20, peopleStats);
+  let structure = analyzeReportStructure(reportBody);
+  console.log(
+    `Report structure stats: top3=${structure.top3EventCount}, secondary=${structure.secondaryEventCount}, sourceLinks=${structure.sourceLinkCount}`,
+  );
+
+  const retryWeakStructure = parseBooleanEnv(process.env.GEMINI_RETRY_WEAK_STRUCTURE, true);
+  if (retryWeakStructure && isStructureWeak(structure)) {
+    console.warn(
+      `Weak report structure detected. Retrying Gemini once (top3=${structure.top3EventCount}, secondary=${structure.secondaryEventCount}, links=${structure.sourceLinkCount})...`,
+    );
+    const repairPrompt = `${prompt}
+
+上一次输出结构不达标，请重新输出并严格满足：
+- TOP3热度事件必须正好3条（编号1-3）
+- 中热度话题下至少4条事件
+- 每条事件至少2条相关动态，且每条动态都必须包含 [@本名](url) 链接
+- 不要跳号（例如 1 后直接到 4）`;
+    markdown = await requestGeminiReport({ apiKey, model, prompt: repairPrompt });
+    normalized = normalizeMarkdownLayout(markdown);
+    withRealNameLinks = relabelSourceLinksWithRealNames(normalized, top20);
+    reportBody = appendTop20Appendix(withRealNameLinks, top20, peopleStats);
+    structure = analyzeReportStructure(reportBody);
+    console.log(
+      `Report structure stats after retry: top3=${structure.top3EventCount}, secondary=${structure.secondaryEventCount}, sourceLinks=${structure.sourceLinkCount}`,
+    );
+  }
+  if (isStructureWeak(structure)) {
+    console.warn(
+      `Report structure still weak after retry. Falling back to deterministic structure from source items (top3=${structure.top3EventCount}, secondary=${structure.secondaryEventCount}, links=${structure.sourceLinkCount}).`,
+    );
+    const fallbackMarkdown = buildFallbackReportFromItems(promptItems, top20);
+    normalized = normalizeMarkdownLayout(fallbackMarkdown);
+    withRealNameLinks = relabelSourceLinksWithRealNames(normalized, top20);
+    reportBody = appendTop20Appendix(withRealNameLinks, top20, peopleStats);
+    structure = analyzeReportStructure(reportBody);
+    console.log(
+      `Report structure stats after deterministic fallback: top3=${structure.top3EventCount}, secondary=${structure.secondaryEventCount}, sourceLinks=${structure.sourceLinkCount}`,
+    );
+  }
 
   // Generate summary as a separate step based on the finished report
   console.log('Generating Today\'s Summary based on report content...');
@@ -1315,12 +1737,245 @@ async function sendEmail(reportMarkdown) {
   });
 }
 
-// Cross-validate report against Chinese tech media (量子位, 机器之心, 新智元)
-// Fetches recent articles via web search and asks Gemini to compare coverage
+function parseDateLoose(value) {
+  if (!value) return null;
+  const asNumber = Number(String(value).trim());
+  if (Number.isFinite(asNumber)) {
+    // Support unix seconds / milliseconds timestamps
+    const ms = asNumber > 1e12 ? asNumber : asNumber > 1e9 ? asNumber * 1000 : NaN;
+    if (Number.isFinite(ms)) {
+      const d = new Date(ms);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+  }
+  const parsed = new Date(value);
+  if (!Number.isNaN(parsed.getTime())) return parsed;
+  const normalized = String(value).replace(/年|\/|\./g, '-').replace(/月/g, '-').replace(/日/g, '').trim();
+  // If timestamp has no timezone info, assume UTC to avoid host-locale drift.
+  const maybeNoTimezone = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(normalized)
+    ? `${normalized.replace(' ', 'T')}Z`
+    : normalized;
+  const parsedNoTz = new Date(maybeNoTimezone);
+  if (!Number.isNaN(parsedNoTz.getTime())) return parsedNoTz;
+  const parsedNormalized = new Date(normalized);
+  if (!Number.isNaN(parsedNormalized.getTime())) return parsedNormalized;
+  return null;
+}
+
+function isWithinDays(date, days) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return false;
+  const now = Date.now();
+  return now - date.getTime() <= days * 24 * 60 * 60 * 1000;
+}
+
+function stripHtmlTags(text) {
+  return String(text || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function decodeXmlEntities(text) {
+  return String(text || '')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .trim();
+}
+
+async function fetchTextWithTimeout(url, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; AI-Pulse-DailyBrief/1.0)',
+        Accept: 'text/html,application/xml,text/xml,application/rss+xml,application/atom+xml;q=0.9,*/*;q=0.8',
+      },
+    });
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return await response.text();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchTextWithFallback(url, timeoutMs = 15000) {
+  try {
+    return await fetchTextWithTimeout(url, timeoutMs);
+  } catch (err) {
+    const useJinaFallback = parseBooleanEnv(process.env.CROSS_VALIDATE_USE_JINA, true);
+    if (!useJinaFallback) throw err;
+    const jinaUrl = `https://r.jina.ai/http://${String(url).replace(/^https?:\/\//i, '')}`;
+    return fetchTextWithTimeout(jinaUrl, timeoutMs);
+  }
+}
+
+const TWITTER_NEWS_HINTS = ['twitter', 'x.com', 'tweet', 'tweets', '推特', '马斯克', '转帖', '转推', '发帖', '@'];
+
+function isTwitterRelatedArticle(article) {
+  const haystack = `${article?.title || ''} ${article?.description || ''}`.toLowerCase();
+  return TWITTER_NEWS_HINTS.some((kw) => haystack.includes(kw.toLowerCase()));
+}
+
+function normalizeWeChatUrl(url) {
+  try {
+    const u = new URL(url);
+    if (!/mp\.weixin\.qq\.com$/i.test(u.hostname)) return '';
+    if (!u.pathname.startsWith('/s')) return '';
+    const keep = new URLSearchParams();
+    ['__biz', 'mid', 'idx', 'sn', 'scene'].forEach((k) => {
+      const v = u.searchParams.get(k);
+      if (v) keep.set(k, v);
+    });
+    u.search = keep.toString();
+    return u.toString();
+  } catch {
+    return '';
+  }
+}
+
+function extractWeChatArticleUrls(text) {
+  const urls = String(text || '').match(/https?:\/\/mp\.weixin\.qq\.com\/s\?[^\s<>"')]+/gi) || [];
+  return Array.from(new Set(urls.map(normalizeWeChatUrl).filter(Boolean)));
+}
+
+function parseWeChatArticleMeta(html, url, expectedMediaName) {
+  const title = decodeXmlEntities(
+    html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
+    || html.match(/<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
+    || html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]
+    || '',
+  );
+
+  const accountName = decodeXmlEntities(
+    html.match(/<meta[^>]+property=["']og:article:author["'][^>]+content=["']([^"']+)["']/i)?.[1]
+    || html.match(/var\s+nickname\s*=\s*htmlDecode\("([^"]+)"\)/i)?.[1]
+    || html.match(/var\s+nickname\s*=\s*"([^"]+)"/i)?.[1]
+    || '',
+  );
+
+  const publishedText = decodeXmlEntities(
+    html.match(/<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"']+)["']/i)?.[1]
+    || html.match(/var\s+publish_time\s*=\s*"([^"]+)"/i)?.[1]
+    || '',
+  );
+
+  const epochMatch = html.match(/var\s+ct\s*=\s*"?(?<ts>\d{10})"?/i);
+  const epochDate = epochMatch?.groups?.ts ? new Date(Number(epochMatch.groups.ts) * 1000) : null;
+  const publishedAtDate = epochDate && !Number.isNaN(epochDate.getTime()) ? epochDate : parseDateLoose(publishedText);
+
+  const description = stripHtmlTags(
+    decodeXmlEntities(
+      html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      || '',
+    ),
+  ).slice(0, 500);
+
+  if (!title) return null;
+  if (!accountName || !accountName.includes(expectedMediaName)) return null;
+
+  return {
+    media: expectedMediaName,
+    title,
+    link: url,
+    publishedAt: publishedAtDate ? publishedAtDate.toISOString() : null,
+    description,
+    source: 'wechat',
+    accountName,
+  };
+}
+
+async function fetchRecentMediaArticles() {
+  const targetMedia = ['量子位', '机器之心', '新智元'];
+  const candidateUrls = new Map();
+
+  for (const mediaName of targetMedia) {
+    const searchQueries = [
+      `${mediaName} 推特`,
+      `${mediaName} Twitter X`,
+      `${mediaName} AI`,
+    ];
+    for (const q of searchQueries) {
+      const sogouUrl = `https://weixin.sogou.com/weixin?type=2&query=${encodeURIComponent(q)}`;
+      const bingUrl = `https://cn.bing.com/search?q=${encodeURIComponent(`site:mp.weixin.qq.com "${mediaName}" ${q}`)}`;
+      for (const searchUrl of [sogouUrl, bingUrl]) {
+        try {
+          const page = await fetchTextWithFallback(searchUrl, 15000);
+          const links = extractWeChatArticleUrls(page);
+          if (!candidateUrls.has(mediaName)) candidateUrls.set(mediaName, new Set());
+          links.forEach((u) => candidateUrls.get(mediaName).add(u));
+        } catch (err) {
+          console.warn(`Search fetch failed for ${mediaName} (${searchUrl}): ${err.message}`);
+        }
+      }
+    }
+  }
+
+  const allArticles = [];
+  for (const mediaName of targetMedia) {
+    const urls = Array.from(candidateUrls.get(mediaName) || []).slice(0, 12);
+    for (const url of urls) {
+      try {
+        const html = await fetchTextWithFallback(url, 15000);
+        const article = parseWeChatArticleMeta(html, url, mediaName);
+        if (!article) continue;
+        allArticles.push(article);
+      } catch (err) {
+        console.warn(`Article fetch failed for ${mediaName} (${url}): ${err.message}`);
+      }
+    }
+  }
+
+  const deduped = [];
+  const seen = new Set();
+  for (const article of allArticles) {
+    const key = `${article.media}::${article.link}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(article);
+  }
+
+  const recent = deduped
+    .filter((a) => !a.publishedAt || isWithinDays(parseDateLoose(a.publishedAt), 2))
+    .sort((a, b) => new Date(b.publishedAt || 0).getTime() - new Date(a.publishedAt || 0).getTime());
+
+  const twitterRelated = recent.filter(isTwitterRelatedArticle);
+  return {
+    recentArticles: recent.slice(0, 30),
+    twitterArticles: twitterRelated.slice(0, 15),
+  };
+}
+
+// Cross-validate report against three specific WeChat public accounts:
+// 量子位, 机器之心, 新智元
 async function crossValidateWithMedia({ apiKey, model, reportMarkdown }) {
   console.log('Starting cross-validation with Chinese AI media...');
 
   const mediaNames = ['量子位', '机器之心', '新智元'];
+  const { recentArticles, twitterArticles } = await fetchRecentMediaArticles();
+  const selectedArticles = twitterArticles.length > 0 ? twitterArticles : recentArticles;
+  const articleLines = selectedArticles.map((a, idx) => {
+    const when = a.publishedAt ? a.publishedAt.slice(0, 10) : '未知日期';
+    return `${idx + 1}. [${a.media}] ${a.title}（${when}）\n   链接: ${a.link}\n   摘要: ${a.description || '无摘要'}`;
+  });
+
+  await fs.mkdir('artifacts', { recursive: true });
+  await fs.writeFile(
+    'artifacts/media-cross-validation-sources.json',
+    JSON.stringify({ generatedAt: new Date().toISOString(), recentArticles, twitterArticles }, null, 2),
+    'utf8',
+  );
 
   const crossValidationPrompt = `你是一个AI行业分析师，负责对比验证日报的覆盖质量。
 
@@ -1329,7 +1984,10 @@ async function crossValidateWithMedia({ apiKey, model, reportMarkdown }) {
 ${reportMarkdown.slice(0, 6000)}
 ---
 
-请你根据自己对近两天AI行业动态的了解，模拟"${mediaNames.join('、')}"这三个国内顶级AI公众号的视角来交叉验证：
+以下是从"${mediaNames.join('、')}"公开站点实时抓取到的最近两天文章（优先Twitter/X相关新闻）：
+${articleLines.length > 0 ? articleLines.join('\n') : '未抓取到可用外部文章，请明确指出“外部数据缺失”。'}
+
+请你必须基于上面“实时抓取文章”来交叉验证日报（不要仅凭常识）：
 
 1. **覆盖盲区**：这三家公众号近两天可能会重点报道、但我们日报中可能遗漏的重大事件有哪些？（只列真实可能发生的事件，不要编造）
 2. **权重偏差**：我们日报中某些事件的重要性是否被高估或低估了？从国内视角看，哪些事件对中国AI从业者更重要？
@@ -1463,6 +2121,7 @@ async function main() {
 
   const today = formatBjtDateDaysAgo(0);
   const yesterday = formatBjtDateDaysAgo(1);
+  const tomorrow = formatBjtDateDaysAgo(-1);
   const weekAgo = formatBjtDateDaysAgo(7);
 
   const rosterHandles = roster.map((p) => p.handle);
@@ -1484,18 +2143,60 @@ async function main() {
   const tablePaths = await writeWeeklyCountsTable(ranking);
   console.log(`Weekly output table saved: ${tablePaths.artifactMarkdownPath}, ${tablePaths.artifactCsvPath}`);
 
-  // NOTE: Twitter since/until uses UTC dates, but we generate BJT dates.
-  // This causes ~8h offset: some older tweets included, some recent ones missed.
-  // For better precision, filter by item.createdAt timestamp after fetching.
-  const dailyInput = buildApifyInput(templateInput, top20.map((p) => p.handle), yesterday, today, 1000);
-  if (top20.length > 0) console.log(`Example daily searchTerm: from:${top20[0].handle} since:${yesterday} until:${today}`);
-  const daily = await runApify(dailyInput);
-  const aiRelatedDaily = daily.items.filter(isAiRelatedItem);
-  console.log(`Daily items: ${daily.items.length}, AI-related: ${aiRelatedDaily.length}`);
+  // We want BJT "today + yesterday". Since Twitter since/until is UTC-date based,
+  // we query a slightly broader window then apply precise BJT-date filtering locally.
+  const dailyTargetSince = yesterday;
+  const dailyTargetUntil = tomorrow; // exclusive: include yesterday and today
+  const dailyQuerySince = formatBjtDateDaysAgo(2);
+  const dailyQueryUntil = tomorrow;
+  const dailyInput = buildApifyInput(templateInput, top20.map((p) => p.handle), dailyQuerySince, dailyQueryUntil, 1000);
+  if (top20.length > 0) {
+    console.log(
+      `Example daily searchTerm: from:${top20[0].handle} since:${dailyQuerySince} until:${dailyQueryUntil} (target BJT range: [${dailyTargetSince}, ${dailyTargetUntil}))`,
+    );
+  }
+  const dailyFromWeekly = selectDailyItemsFromWeekly({
+    weeklyItems,
+    top20Handles: top20.map((p) => p.handle),
+    dailySince: dailyTargetSince,
+    dailyUntil: dailyTargetUntil,
+  });
+  const enableSkipSecondFetch = parseBooleanEnv(process.env.APIFY_SKIP_SECOND_FETCH_IF_SUFFICIENT, true);
+  const dailyMinItems = Number(process.env.APIFY_DAILY_MIN_ITEMS || 80);
+  const maxMissingHandles = Number(process.env.APIFY_DAILY_MAX_MISSING_TOP20 || 8);
+  const dailyMinAiItems = Number(process.env.APIFY_DAILY_MIN_AI_ITEMS || 30);
+  const dailyMinAiHandles = Number(process.env.APIFY_DAILY_MIN_AI_HANDLES || 8);
+  const enoughByWeekly = shouldSkipSecondDailyFetch({
+    candidateItems: dailyFromWeekly,
+    top20,
+    maxMissingHandles: Number.isFinite(maxMissingHandles) ? Math.max(0, Math.floor(maxMissingHandles)) : 8,
+    minItems: Number.isFinite(dailyMinItems) ? Math.max(1, Math.floor(dailyMinItems)) : 80,
+  });
+  const weeklyAiCoverage = getDailyAiCoverage(dailyFromWeekly);
+  const enoughAiCoverage = weeklyAiCoverage.aiCount >= (Number.isFinite(dailyMinAiItems) ? Math.max(1, Math.floor(dailyMinAiItems)) : 30)
+    && weeklyAiCoverage.aiHandleCount >= (Number.isFinite(dailyMinAiHandles) ? Math.max(1, Math.floor(dailyMinAiHandles)) : 8);
+  console.log(
+    `Daily weekly-subset coverage: total=${dailyFromWeekly.length}, ai=${weeklyAiCoverage.aiCount}, aiHandles=${weeklyAiCoverage.aiHandleCount}, threshold(total>=${dailyMinItems}, ai>=${dailyMinAiItems}, aiHandles>=${dailyMinAiHandles})`,
+  );
+
+  let dailyItems;
+  if (enableSkipSecondFetch && enoughByWeekly && enoughAiCoverage) {
+    dailyItems = dailyFromWeekly;
+    console.log(`Daily fetch skipped: reused weekly subset (${dailyItems.length} items, top20=${top20.length})`);
+  } else {
+    const daily = await runApify(dailyInput);
+    dailyItems = mergeUniqueItems(dailyFromWeekly, daily.items);
+    console.log(`Daily fetched via Apify and merged: weeklySubset=${dailyFromWeekly.length}, fetched=${daily.items.length}, merged=${dailyItems.length}`);
+  }
+  dailyItems = filterItemsByBjtDateRange(dailyItems, dailyTargetSince, dailyTargetUntil);
+  console.log(`Daily items after precise BJT date filter [${dailyTargetSince}, ${dailyTargetUntil}): ${dailyItems.length}`);
+
+  const aiRelatedDaily = dailyItems.filter(isAiRelatedItem);
+  console.log(`Daily items: ${dailyItems.length}, AI-related: ${aiRelatedDaily.length}`);
 
   // Generate full action sheet (ALL daily items from TOP20, grouped by topic)
   // This runs independently and doesn't affect the daily report pipeline
-  await generateActionSheet(daily.items, top20);
+  await generateActionSheet(dailyItems, top20);
 
   const hotspotStats = getHotspotStats(aiRelatedDaily);
   const dailyPeopleStats = getDailyPeopleStats(aiRelatedDaily);
