@@ -344,8 +344,8 @@ function toBjtDateString(dateObj) {
 function extractItemBjtDate(item) {
   const createdAt = extractCreatedAtFromItem(item);
   if (!createdAt) return '';
-  const parsed = parseDateLoose(createdAt);
-  if (!parsed || Number.isNaN(parsed.getTime())) return '';
+  const parsed = new Date(createdAt);
+  if (Number.isNaN(parsed.getTime())) return '';
   return toBjtDateString(parsed);
 }
 
