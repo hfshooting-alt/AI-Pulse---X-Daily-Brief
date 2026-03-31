@@ -1214,40 +1214,11 @@ function markdownToStyledHtml(markdown) {
   if (currentEvent) events.push(currentEvent);
   inRelatedDynamicBlock = false;
 
-  // Split events by section title: events under the TOP3 header go into top3,
-  // everything else goes into secondary.  This is more robust than a blind
-  // slice(0,3) which breaks whenever a phantom event shifts positions.
-  const top3 = [];
-  const secondary = [];
-  for (const evt of events) {
-    if (top3.length < 3 && /top\s*3|(?<!中)热度事件/i.test(evt.sectionTitle || '')) {
-      top3.push(evt);
-    } else {
-      secondary.push(evt);
-    }
-  }
-  // Fallback: if section-based split found no top3 (LLM didn't use expected header),
-  // fall back to positional slice.
-  if (top3.length === 0 && events.length > 0) {
-    top3.push(...events.slice(0, Math.min(3, events.length)));
-    secondary.length = 0;
-    secondary.push(...events.slice(top3.length));
-  }
-  // Only borrow from secondary if the candidates have real content (at least 1 action with a source link).
-  // This prevents garbage placeholders like "事件补充/暂无可用来源" from being promoted to top3.
-  if (top3.length < 3 && secondary.length > 0) {
-    const realSecondary = secondary.filter((evt) =>
-      evt.actions.length > 0 && evt.actions.some((a) => /\[@[^\]]+\]\(https?:\/\/[^)]+\)/.test(a))
-    );
-    if (realSecondary.length > 0) {
-      const deficit = 3 - top3.length;
-      const borrowed = realSecondary.slice(0, deficit);
-      for (const b of borrowed) secondary.splice(secondary.indexOf(b), 1);
-      top3.push(...borrowed);
-      console.log(`Renderer adjusted top3 count: borrowed=${borrowed.length}, top3=${top3.length}, secondary=${secondary.length}`);
-    }
-  }
-  // Renumber top3 events sequentially (borrowed events may carry wrong indices)
+  // Unified ranking: all events are treated equally and ranked together.
+  // The first 3 go to TOP3, the rest go to secondary (中热度).
+  // This avoids depending on Gemini's section headers for splitting.
+  const top3 = events.slice(0, Math.min(3, events.length));
+  const secondary = events.slice(top3.length);
   top3.forEach((evt, i) => { evt.index = i + 1; });
   console.log(`Renderer parse stats: events=${events.length}, top3=${top3.length}, secondary=${secondary.length}`);
 
