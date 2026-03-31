@@ -452,16 +452,18 @@ function isAiRelatedItem(item) {
   return weakHits >= 2;
 }
 
+// Rules are ordered from MOST SPECIFIC to LEAST SPECIFIC so that classifyHotspots
+// returns the most meaningful label first.  Broad catch-all categories go last.
 const HOTSPOT_RULES = [
-  { label: '模型与推理能力', enKws: ['model', 'llm', 'inference', 'gpt', 'gemini', 'claude', 'llama', 'mistral', 'reasoning', 'benchmark'], cnKws: ['大模型', '推理', '模型'] },
-  { label: 'Agent与自动化', enKws: ['agent', 'workflow', 'automation', 'mcp', 'tool use', 'function calling'], cnKws: ['智能体', '自动化', 'Agent'] },
-  { label: '算力与芯片', enKws: ['nvidia', 'gpu', 'chip', 'tpu', 'compute', 'hardware'], cnKws: ['算力', '芯片'] },
   { label: '机器人与具身智能', enKws: ['robot', 'humanoid', 'optimus', 'embodied'], cnKws: ['机器人', '具身'] },
-  { label: '产品发布与商业化', enKws: ['launch', 'release', 'pricing', 'funding', 'startup', 'revenue', 'monetize'], cnKws: ['融资', '发布', '定价', '商业化', '上线'] },
-  { label: '开发工具与编程', enKws: ['coding', 'copilot', 'cursor', 'ide', 'vscode', 'developer', 'api', 'sdk', 'devtool'], cnKws: ['编程', '开发工具', '代码'] },
-  { label: '开源与社区', enKws: ['open source', 'opensource', 'github', 'huggingface', 'community', 'weights'], cnKws: ['开源', '社区', '权重'] },
+  { label: '算力与芯片', enKws: ['nvidia', 'gpu', 'chip', 'tpu', 'compute', 'hardware'], cnKws: ['算力', '芯片'] },
   { label: '多模态与视觉', enKws: ['multimodal', 'vision', 'image', 'video', 'diffusion', 'sora', 'text-to', 'ocr'], cnKws: ['多模态', '视觉', '图像', '视频'] },
   { label: '安全与治理', enKws: ['safety', 'alignment', 'regulation', 'governance', 'policy', 'ethics', 'risk'], cnKws: ['安全', '对齐', '监管', '治理'] },
+  { label: '开源与社区', enKws: ['open source', 'opensource', 'huggingface', 'community', 'weights'], cnKws: ['开源', '社区', '权重'] },
+  { label: 'Agent与自动化', enKws: ['agent', 'workflow', 'automation', 'mcp', 'tool use', 'function calling'], cnKws: ['智能体', '自动化', 'Agent'] },
+  { label: '开发工具与编程', enKws: ['coding', 'copilot', 'cursor', 'windsurf', 'devin', 'ide', 'vscode', 'developer', 'devtool', 'code review', 'vibe coding'], cnKws: ['编程', '开发工具', '代码'] },
+  { label: '产品发布与商业化', enKws: ['launch', 'release', 'pricing', 'funding', 'startup', 'revenue', 'monetize', 'customers', 'distribution', 'growing'], cnKws: ['融资', '发布', '定价', '商业化', '上线'] },
+  { label: '模型与推理能力', enKws: ['llm', 'inference', 'gpt', 'gemini', 'llama', 'mistral', 'reasoning', 'benchmark', 'fine-tune', 'finetune'], cnKws: ['大模型', '推理'] },
 ];
 
 function classifyHotspots(text) {
@@ -1231,11 +1233,19 @@ function markdownToStyledHtml(markdown) {
     secondary.length = 0;
     secondary.push(...events.slice(top3.length));
   }
+  // Only borrow from secondary if the candidates have real content (at least 1 action with a source link).
+  // This prevents garbage placeholders like "事件补充/暂无可用来源" from being promoted to top3.
   if (top3.length < 3 && secondary.length > 0) {
-    const deficit = 3 - top3.length;
-    const borrowed = secondary.splice(0, deficit);
-    top3.push(...borrowed);
-    console.log(`Renderer adjusted top3 count: borrowed=${borrowed.length}, top3=${top3.length}, secondary=${secondary.length}`);
+    const realSecondary = secondary.filter((evt) =>
+      evt.actions.length > 0 && evt.actions.some((a) => /\[@[^\]]+\]\(https?:\/\/[^)]+\)/.test(a))
+    );
+    if (realSecondary.length > 0) {
+      const deficit = 3 - top3.length;
+      const borrowed = realSecondary.slice(0, deficit);
+      for (const b of borrowed) secondary.splice(secondary.indexOf(b), 1);
+      top3.push(...borrowed);
+      console.log(`Renderer adjusted top3 count: borrowed=${borrowed.length}, top3=${top3.length}, secondary=${secondary.length}`);
+    }
   }
   // Renumber top3 events sequentially (borrowed events may carry wrong indices)
   top3.forEach((evt, i) => { evt.index = i + 1; });
@@ -1305,7 +1315,7 @@ function markdownToStyledHtml(markdown) {
 
   const executiveSummary = summaryLines.length > 0
     ? summaryLines.map((t) => t.replace(/^[-•]\s*/, '').replace(/^[^：:]+[：:]\s*/, '')).join('；')
-    : `今日高热度集中在AI产品化推进与模型能力迭代，主要关注方向为Top 3热点与中热度主题演进，监测范围覆盖Top20 active AI voices in the last 24h，对管理层的意义在于优化资源投放效率并把握竞争窗口。`;
+    : `今日高热度集中在AI产品化推进与模型能力迭代，主要关注方向为Top 3热点与中热度主题演进，监测范围覆盖近24小时内最活跃的20位AI领域关键人物，对管理层的意义在于优化资源投放效率并把握竞争窗口。`;
 
   return `
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#F5F7FA;padding:28px 0;margin:0;">
@@ -1315,29 +1325,29 @@ function markdownToStyledHtml(markdown) {
         <tr>
           <td style="background:#111827;padding:24px 28px;">
             <div style="font-size:34px;line-height:1.25;font-weight:700;color:#ffffff;">${formatInlineMarkdown(reportTitle)}</div>
-            <div style="margin-top:8px;font-size:13px;line-height:1.5;color:#d1d5db;">${today} · Auto-generated executive intelligence brief</div>
+            <div style="margin-top:8px;font-size:13px;line-height:1.5;color:#d1d5db;">${today} · AI行业动态日报（自动生成）</div>
           </td>
         </tr>
         <tr>
           <td style="padding:16px 24px 6px 24px;">
-            ${renderSectionBlock('Key Section', 'Top 3 Hot Events', top3.length > 0 ? top3.map(renderEventCard).join('') : '<div style="font-size:16px;color:#4b5563;padding:12px 0;line-height:1.7;">今日暂无可用热点事件。</div>')}
+            ${renderSectionBlock('核心板块', 'TOP3 热度事件', top3.length > 0 ? top3.map(renderEventCard).join('') : '<div style="font-size:16px;color:#4b5563;padding:12px 0;line-height:1.7;">今日暂无可用热点事件。</div>')}
           </td>
         </tr>
         <tr>
           <td style="padding:0 24px 6px 24px;">
-            ${renderSectionBlock('Key Section', 'Secondary Topics', secondaryTopics.length > 0 ? secondaryTopics.map((topic, i) => renderSecondaryTopicGroup(topic, i)).join('') : '<div style="font-size:16px;color:#4B5563;line-height:1.7;">今日中热度主题较少，建议持续观察明日信号。</div>')}
+            ${renderSectionBlock('核心板块', '中热度话题', secondaryTopics.length > 0 ? secondaryTopics.map((topic, i) => renderSecondaryTopicGroup(topic, i)).join('') : '<div style="font-size:16px;color:#4B5563;line-height:1.7;">今日中热度主题较少，建议持续观察明日信号。</div>')}
           </td>
         </tr>
         <tr>
           <td style="padding:0 24px 6px 24px;">
-            ${renderSectionBlock('Summary', 'Executive Summary', `<div style="border:1px solid #d1d5db;border-left:4px solid #111827;border-radius:8px;background:#f9fafb;padding:14px 14px 12px 14px;"><div style="font-size:17px;line-height:1.8;color:#111827;">${formatInlineMarkdown(executiveSummary)}</div></div>`)}
+            ${renderSectionBlock('总结', '今日总结', `<div style="border:1px solid #d1d5db;border-left:4px solid #111827;border-radius:8px;background:#f9fafb;padding:14px 14px 12px 14px;"><div style="font-size:17px;line-height:1.8;color:#111827;">${formatInlineMarkdown(executiveSummary)}</div></div>`)}
           </td>
         </tr>
-        ${appendixLines.length > 0 ? `<tr><td style="padding:0 24px 6px 24px;">${renderSectionBlock('Ranking', 'TOP20活跃人物', `<div style="font-size:15px;color:#4b5563;line-height:1.75;">${appendixLines.map((n) => `<div style="margin:0 0 6px 0;">${formatInlineMarkdown(n)}</div>`).join('')}</div>`)}</td></tr>` : ''}
+        ${appendixLines.length > 0 ? `<tr><td style="padding:0 24px 6px 24px;">${renderSectionBlock('排行', 'TOP20活跃人物', `<div style="font-size:15px;color:#4b5563;line-height:1.75;">${appendixLines.map((n) => `<div style="margin:0 0 6px 0;">${formatInlineMarkdown(n)}</div>`).join('')}</div>`)}</td></tr>` : ''}
         ${topSectionNotes.length > 0 ? `<tr><td style="padding:0 24px 12px 24px;"><div style="border:1px solid #E5E7EB;border-radius:12px;background:#FFFFFF;padding:12px 14px;"><div style="font-size:14px;color:#4b5563;line-height:1.7;">${topSectionNotes.map((n) => `<div style="margin:0 0 6px 0;">${formatInlineMarkdown(n)}</div>`).join('')}</div></div></td></tr>` : ''}
         <tr>
           <td style="padding:10px 24px 20px 24px;border-top:1px solid #e5e7eb;">
-            <div style="font-size:13px;color:#6b7280;line-height:1.65;">This brief is generated for management quick-read. Source links are embedded in each event card for direct verification and follow-up.</div>
+            <div style="font-size:13px;color:#6b7280;line-height:1.65;">本日报由 AI Pulse Agent 自动生成，各事件卡片内嵌来源链接，可直接点击查看原帖验证。</div>
           </td>
         </tr>
       </table>
@@ -1561,6 +1571,7 @@ async function generateSummary({ apiKey, model, reportMarkdown }) {
 
 要求：
 - 用 ## Today's Summary 作为独立的二级标题
+- **必须使用中文撰写**，不要使用英文
 - 内容用一个自然段完成（不分点，不超过200字）
 - 不得将 Today's Summary 作为编号列表中的一项
 - 概括今天日报中最重要的趋势和事件
@@ -1627,15 +1638,29 @@ function buildFallbackReportFromItems(items, top20) {
   console.log('fallback zh dynamic mode enabled');
   const nameMap = new Map((top20 || []).map((p) => [normalizeHandle(p.handle), p.name || p.handle]));
 
-  // Group items by topic, dedup by handle per topic, keep actual text
+  // Group items by topic with load-balanced assignment:
+  // When a tweet matches multiple topics, assign it to the LEAST populated bucket
+  // to ensure items are distributed across topics instead of all piling into one.
   const topicBuckets = new Map();
+  const globalHandleTopics = new Map(); // handle → Set of topics already assigned
   for (const item of items || []) {
     const handle = normalizeHandle(extractHandleFromItem(item));
     if (!handle) continue;
     const text = extractTextFromItem(item).replace(/\s+/g, ' ').trim();
     const url = item?.url || item?.tweetUrl || item?.link || '';
     if (!text || !url) continue;
-    const topic = classifyHotspots(text)[0] || '其他AI动态';
+    const labels = classifyHotspots(text);
+    // Pick the matching label with the fewest current entries (load balancing)
+    let bestLabel = labels[0] || '其他AI动态';
+    let minCount = Infinity;
+    for (const label of labels) {
+      const count = topicBuckets.get(label)?.length || 0;
+      if (count < minCount) {
+        minCount = count;
+        bestLabel = label;
+      }
+    }
+    const topic = bestLabel;
     if (!topicBuckets.has(topic)) topicBuckets.set(topic, []);
     // Per-topic handle dedup
     if (topicBuckets.get(topic).some((e) => e.handle === handle)) continue;
@@ -1694,15 +1719,17 @@ ${dynamics}`;
     ))
     .join('\n\n');
 
+  // Do NOT generate placeholder events (e.g. "事件补充/暂无可用来源") —
+  // they get parsed as real events and borrowed into top3, creating garbage cards.
   return `# AI Pulse - X Daily Brief
 
 ## TOP3 热度事件
 
-${top3Sections || '1. 今日核心信号不足\n   - **热点解析：** 今日样本中可聚类信号有限，建议关注明日增量。\n   - **相关动态：**\n     - [@来源](https://x.com): 暂无可用来源。'}
+${top3Sections || '暂无足够数据生成热度事件。'}
 
 ## 中热度话题
 
-${secondarySections || '### 其他观察\n\n1. 事件补充\n   - **热点解析：** 中热度事件不足，保留观察。\n   - **相关动态：**\n     - [@来源](https://x.com): 暂无可用来源。'}
+${secondarySections || '暂无中热度话题。'}
 `;
 }
 
