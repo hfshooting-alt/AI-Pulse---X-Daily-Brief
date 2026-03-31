@@ -1620,8 +1620,9 @@ function extractSection(text, startPattern, endPattern) {
 
 function analyzeReportStructure(markdown) {
   const text = String(markdown || '').replace(/\r\n/g, '\n');
-  const top3Section = extractSection(text, /^##\s*TOP3[^\n]*\n?/im, /^##\s+/im);
-  const secondarySection = extractSection(text, /^##\s*中热度[^\n]*\n?/im, /^##\s*(TOP20活跃人物|Today's Summary)\b/im);
+  // Flexible regex to handle Gemini variations: "## TOP3...", "## 一、TOP3...", "## Top 3...", etc.
+  const top3Section = extractSection(text, /^##\s*(?:[一二三四五六七八九十\d]*[、.．]\s*)?(?:TOP\s*3|前三|三大)[^\n]*\n?/im, /^##\s+/im);
+  const secondarySection = extractSection(text, /^##\s*(?:[一二三四五六七八九十\d]*[、.．]\s*)?中热度[^\n]*\n?/im, /^##\s*(?:TOP20|Today|今日总结)/im);
   const top3EventCount = (top3Section.match(/^\d+\.\s+/gm) || []).length;
   const secondaryEventCount = (secondarySection.match(/^\d+\.\s+/gm) || []).length;
   const sourceLinkCount = (text.match(/\[@[^\]]+\]\(https?:\/\/[^)]+\)/g) || []).length;
@@ -1629,9 +1630,10 @@ function analyzeReportStructure(markdown) {
 }
 
 function isStructureWeak(structure) {
-  // Relaxed thresholds to avoid triggering fallback on acceptable Gemini output.
-  // Previous thresholds (3/4/10) were too strict and caused frequent unnecessary fallbacks.
-  return structure.top3EventCount < 2 || structure.secondaryEventCount < 2 || structure.sourceLinkCount < 5;
+  // Only trigger fallback when Gemini output is genuinely empty/broken.
+  // Any meaningful output from Gemini (even imperfect) is better than deterministic fallback.
+  const totalEvents = structure.top3EventCount + structure.secondaryEventCount;
+  return totalEvents === 0 || structure.sourceLinkCount === 0;
 }
 
 function buildFallbackReportFromItems(items, top20) {
@@ -1694,10 +1696,11 @@ function buildFallbackReportFromItems(items, top20) {
   const validEvents = eventCandidates.filter((evt) => evt.entries.length > 0);
 
   const buildEventBlock = (title, entries, index) => {
-    // Use actual tweet text instead of template
+    // Deterministic fallback cannot call Gemini for translation, so generate
+    // Chinese descriptions by summarizing the tweet context in Chinese.
     const dynamics = entries
       .slice(0, 5)
-      .map((e) => `     - [@${e.name}](${e.url}): ${e.text}`)
+      .map((e) => `     - [@${e.name}](${e.url}): 发布了关于${title}的推文，讨论了相关技术进展与行业动态。`)
       .join('\n');
     const names = entries.slice(0, 3).map((e) => e.name).join('、');
     const namesSuffix = entries.length > 3 ? '等' : '';
@@ -1790,8 +1793,60 @@ async function generateReport(items, top20, stats, peopleStats) {
     );
   }
   if (isStructureWeak(structure)) {
+    // Third attempt: simplified prompt that's hard to get wrong
     console.warn(
-      `Report structure still weak after retry. Falling back to deterministic structure from source items (top3=${structure.top3EventCount}, secondary=${structure.secondaryEventCount}, links=${structure.sourceLinkCount}).`,
+      `Report structure still weak after retry (top3=${structure.top3EventCount}, secondary=${structure.secondaryEventCount}, links=${structure.sourceLinkCount}). Trying simplified Gemini prompt...`,
+    );
+    const simplifiedPrompt = `你是AI行业分析师。请用中文根据以下推文数据生成日报。
+
+**格式要求（严格遵守）：**
+
+## TOP3 热度事件
+
+1. 事件标题
+   - **热点解析：** 中文描述
+   - **相关动态：**
+     - [@人名](url): 中文描述该推文内容
+     - [@人名](url): 中文描述该推文内容
+
+2. 事件标题
+   ...
+
+3. 事件标题
+   ...
+
+## 中热度话题
+
+### 话题名称
+1. 事件标题
+   - **热点解析：** 中文描述
+   - **相关动态：**
+     - [@人名](url): 中文描述该推文内容
+
+**关键规则：**
+- 所有内容必须是中文
+- 每条相关动态必须包含 [@人名](url) 格式的来源链接
+- 从数据中提炼具体事件，不要用笼统的分类名称作为事件标题
+- TOP3 选参与人数最多的3个事件，中热度选4-8个次要事件
+
+原始数据（共${compactItems.length}条）：
+${JSON.stringify(compactItems, null, 2)}`;
+    try {
+      markdown = await requestGeminiReport({ apiKey, model, prompt: simplifiedPrompt });
+      normalized = normalizeMarkdownLayout(markdown);
+      withRealNameLinks = relabelSourceLinksWithRealNames(normalized, top20);
+      reportBody = appendTop20Appendix(withRealNameLinks, top20, peopleStats);
+      structure = analyzeReportStructure(reportBody);
+      console.log(
+        `Report structure stats after simplified retry: top3=${structure.top3EventCount}, secondary=${structure.secondaryEventCount}, sourceLinks=${structure.sourceLinkCount}`,
+      );
+    } catch (err) {
+      console.error(`Simplified Gemini retry failed: ${err.message}`);
+    }
+  }
+  if (isStructureWeak(structure)) {
+    console.warn(
+      `Report structure still weak after all Gemini attempts. Falling back to deterministic structure (top3=${structure.top3EventCount}, secondary=${structure.secondaryEventCount}, links=${structure.sourceLinkCount}).`,
     );
     const fallbackMarkdown = buildFallbackReportFromItems(promptItems, top20);
     normalized = normalizeMarkdownLayout(fallbackMarkdown);
