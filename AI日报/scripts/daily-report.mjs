@@ -1618,12 +1618,16 @@ function analyzeReportStructure(markdown) {
 }
 
 function isStructureWeak(structure) {
-  return structure.top3EventCount < 3 || structure.secondaryEventCount < 4 || structure.sourceLinkCount < 10;
+  // Relaxed thresholds to avoid triggering fallback on acceptable Gemini output.
+  // Previous thresholds (3/4/10) were too strict and caused frequent unnecessary fallbacks.
+  return structure.top3EventCount < 2 || structure.secondaryEventCount < 2 || structure.sourceLinkCount < 5;
 }
 
 function buildFallbackReportFromItems(items, top20) {
   console.log('fallback zh dynamic mode enabled');
   const nameMap = new Map((top20 || []).map((p) => [normalizeHandle(p.handle), p.name || p.handle]));
+
+  // Group items by topic, dedup by handle per topic, keep actual text
   const topicBuckets = new Map();
   for (const item of items || []) {
     const handle = normalizeHandle(extractHandleFromItem(item));
@@ -1633,76 +1637,60 @@ function buildFallbackReportFromItems(items, top20) {
     if (!text || !url) continue;
     const topic = classifyHotspots(text)[0] || '其他AI动态';
     if (!topicBuckets.has(topic)) topicBuckets.set(topic, []);
-    // Dedup: skip if this handle already exists in this topic bucket
+    // Per-topic handle dedup
     if (topicBuckets.get(topic).some((e) => e.handle === handle)) continue;
-    topicBuckets.get(topic).push({ handle, name: nameMap.get(handle) || handle, text: text.slice(0, 180), url });
+    topicBuckets.get(topic).push({ handle, name: nameMap.get(handle) || handle, text: text.slice(0, 150), url });
   }
 
+  // Sort topics by participant count (most participants first)
   const sortedTopics = Array.from(topicBuckets.entries())
+    .filter(([, entries]) => entries.length > 0)
     .sort((a, b) => b[1].length - a[1].length);
 
-  const eventCandidates = [];
-  for (const [topic, entries] of sortedTopics) {
-    // Split each topic into chunks so one hot topic can still generate multiple events.
-    const chunkSize = 4;
-    for (let i = 0; i < entries.length; i += chunkSize) {
-      const chunk = entries.slice(i, i + chunkSize);
-      if (chunk.length === 0) continue;
-      const suffix = i === 0 ? '' : `（扩展${Math.floor(i / chunkSize) + 1}）`;
-      eventCandidates.push({ topic, title: `${topic}${suffix}`, entries: chunk, weight: chunk.length });
-    }
-  }
-  eventCandidates.sort((a, b) => b.weight - a.weight);
+  // Each topic = one event (no chunking into 扩展N)
+  const eventCandidates = sortedTopics.map(([topic, entries]) => ({
+    topic,
+    title: topic,
+    entries,
+    weight: entries.length,
+  }));
 
-  const buildEventBlock = (topic, entries, index) => {
+  // Cross-event handle dedup: if a person already appeared in a higher-priority event,
+  // remove them from lower-priority events to avoid repetition
+  const globalHandleSeen = new Set();
+  for (const evt of eventCandidates) {
+    evt.entries = evt.entries.filter((e) => {
+      if (globalHandleSeen.has(e.handle)) return false;
+      globalHandleSeen.add(e.handle);
+      return true;
+    });
+  }
+  // Remove events that lost all entries after cross-dedup
+  const validEvents = eventCandidates.filter((evt) => evt.entries.length > 0);
+
+  const buildEventBlock = (title, entries, index) => {
+    // Use actual tweet text instead of template
     const dynamics = entries
-      .slice(0, 4)
-      .map((e) => `     - [@${e.name}](${e.url}): 发布了与「${topic}」相关动态，详见原帖。`)
+      .slice(0, 5)
+      .map((e) => `     - [@${e.name}](${e.url}): ${e.text}`)
       .join('\n');
     const names = entries.slice(0, 3).map((e) => e.name).join('、');
     const namesSuffix = entries.length > 3 ? '等' : '';
-    return `${index}. ${topic} 相关信号持续升温
-   - **热点解析：** ${topic} 在今日监测样本中出现频率较高，涉及${names}${namesSuffix}${entries.length}位活跃账号，建议结合相关动态快速判断对业务的直接影响。
+    return `${index}. ${title}
+   - **热点解析：** ${title}方向今日有${names}${namesSuffix}共${entries.length}位活跃账号发布相关动态，建议结合原文判断对业务的影响。
    - **相关动态：**
 ${dynamics}`;
   };
 
-  const allEntries = sortedTopics.flatMap(([, entries]) => entries);
-  while (eventCandidates.length < 7 && allEntries.length > 0) {
-    const i = eventCandidates.length;
-    const slice = allEntries.slice((i * 3) % allEntries.length, ((i * 3) % allEntries.length) + 3);
-    const fallbackEntries = slice.length > 0 ? slice : allEntries.slice(0, 3);
-    eventCandidates.push({
-      topic: '其他AI动态',
-      title: `补充信号${i + 1}`,
-      entries: fallbackEntries,
-      weight: fallbackEntries.length,
-    });
-  }
+  const top3Candidates = validEvents.slice(0, Math.min(3, validEvents.length));
+  const secondaryCandidates = validEvents.slice(3, Math.min(7, validEvents.length));
 
-  // Pick top3 with topic diversity: at most 1 per topic first, then fill remaining
-  const top3Candidates = [];
-  const usedTopics = new Set();
-  for (const evt of eventCandidates) {
-    if (top3Candidates.length >= 3) break;
-    if (!usedTopics.has(evt.topic)) {
-      top3Candidates.push(evt);
-      usedTopics.add(evt.topic);
-    }
-  }
-  for (const evt of eventCandidates) {
-    if (top3Candidates.length >= 3) break;
-    if (!top3Candidates.includes(evt)) {
-      top3Candidates.push(evt);
-    }
-  }
-  const secondaryCandidates = eventCandidates.filter((e) => !top3Candidates.includes(e)).slice(0, 4);
   const top3Sections = top3Candidates
     .map((evt, i) => buildEventBlock(evt.title, evt.entries, i + 1))
     .join('\n\n');
   const secondarySections = secondaryCandidates
     .map((evt, i) => (
-      `### ${evt.topic}\n\n${buildEventBlock(`${evt.title} 进展`, evt.entries, i + 1)}`
+      `### ${evt.topic}\n\n${buildEventBlock(evt.title, evt.entries, i + 1)}`
     ))
     .join('\n\n');
 
