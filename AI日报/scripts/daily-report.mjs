@@ -1,4 +1,6 @@
 import fs from 'node:fs/promises';
+import http from 'node:http';
+import https from 'node:https';
 import path from 'node:path';
 import nodemailer from 'nodemailer';
 
@@ -25,15 +27,20 @@ function optionalEnv(name) {
   return value && value.trim() ? value.trim() : undefined;
 }
 
+function describeError(err) {
+  const parts = [err?.message, err?.code, err?.cause?.message, err?.cause?.code].filter(Boolean);
+  return [...new Set(parts)].join(' | ') || String(err);
+}
+
 async function withRetry(fn, { retries = 3, baseDelayMs = 2000, label = 'operation' } = {}) {
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
       return await fn();
     } catch (err) {
-      const isRetryable = /ECONNRESET|ETIMEDOUT|ENOTFOUND|UND_ERR|fetch failed|AbortError|50[0-3]|429/i.test(err?.message || '');
+      const isRetryable = /ECONNRESET|ETIMEDOUT|ENOTFOUND|UND_ERR|fetch failed|AbortError|LLM_SOCKET_TIMEOUT|50[0-3]|429/i.test(describeError(err));
       if (attempt >= retries || !isRetryable) throw err;
       const delay = baseDelayMs * (2 ** attempt);
-      console.warn(`${label} attempt ${attempt + 1} failed: ${err.message}. Retrying in ${delay}ms...`);
+      console.warn(`${label} attempt ${attempt + 1} failed: ${describeError(err)}. Retrying in ${delay}ms...`);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }

@@ -59,6 +59,8 @@ jobs:
           LLM_API_ENDPOINT: ${{ secrets.LLM_API_ENDPOINT }}
           OPENAI_API_ENDPOINT: ${{ secrets.OPENAI_API_ENDPOINT }}
           GEMINI_TEMPERATURE: ${{ secrets.GEMINI_TEMPERATURE }}
+          LLM_SOCKET_TIMEOUT_MS: ${{ secrets.LLM_SOCKET_TIMEOUT_MS }}
+          LLM_REQUEST_TIMEOUT_MS: ${{ secrets.LLM_REQUEST_TIMEOUT_MS }}
           REPORT_PROMPT_TEMPLATE: ${{ secrets.REPORT_PROMPT_TEMPLATE }}
 
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
