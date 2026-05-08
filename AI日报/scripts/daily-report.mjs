@@ -1529,99 +1529,6 @@ function getPromptTemplate() {
 `;
 }
 
-function parsePositiveIntegerEnv(names, fallback) {
-  for (const name of names) {
-    const value = optionalEnv(name);
-    if (!value) continue;
-    const parsed = Number(value);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-    console.warn(`Ignoring invalid positive integer env ${name}=${value}; using fallback ${fallback}.`);
-  }
-  return fallback;
-}
-
-function getLlmSocketTimeoutMs() {
-  return parsePositiveIntegerEnv(['LLM_SOCKET_TIMEOUT_MS', 'GEMINI_SOCKET_TIMEOUT_MS', 'LLM_CONNECT_TIMEOUT_MS', 'GEMINI_CONNECT_TIMEOUT_MS'], 60_000);
-}
-
-function getLlmRequestTimeoutMs() {
-  return parsePositiveIntegerEnv(['LLM_REQUEST_TIMEOUT_MS', 'GEMINI_REQUEST_TIMEOUT_MS'], 5 * 60 * 1000);
-}
-
-function createTextResponse({ statusCode, headers, bodyText }) {
-  return {
-    ok: statusCode >= 200 && statusCode < 300,
-    status: statusCode,
-    headers,
-    text: async () => bodyText,
-    json: async () => JSON.parse(bodyText),
-  };
-}
-
-function requestJson(url, { headers, body, signal, timeoutMs = 60_000 }) {
-  return new Promise((resolve, reject) => {
-    const parsedUrl = new URL(url);
-    const transport = parsedUrl.protocol === 'http:' ? http : https;
-    const requestBody = JSON.stringify(body);
-
-    const req = transport.request(
-      parsedUrl,
-      {
-        method: 'POST',
-        headers: {
-          ...headers,
-          'Content-Length': Buffer.byteLength(requestBody),
-        },
-      },
-      (res) => {
-        const chunks = [];
-        res.on('data', (chunk) => chunks.push(chunk));
-        res.on('end', () => {
-          cleanup();
-          resolve(createTextResponse({
-            statusCode: res.statusCode || 0,
-            headers: res.headers,
-            bodyText: Buffer.concat(chunks).toString('utf8'),
-          }));
-        });
-      },
-    );
-
-    const cleanup = () => {
-      signal?.removeEventListener('abort', onAbort);
-    };
-
-    const onAbort = () => {
-      const abortError = new Error(`LLM request aborted after ${getLlmRequestTimeoutMs()}ms overall timeout: ${parsedUrl.origin}`);
-      abortError.code = 'LLM_REQUEST_ABORTED';
-      req.destroy(abortError);
-    };
-
-    req.setTimeout(timeoutMs, () => {
-      const timeoutError = new Error(
-        `LLM socket timed out after ${timeoutMs}ms while connecting/reading: ${parsedUrl.origin}. ` +
-          'If this is a company model platform, confirm the base URL is reachable from GitHub Actions or increase LLM_SOCKET_TIMEOUT_MS.',
-      );
-      timeoutError.code = 'LLM_SOCKET_TIMEOUT';
-      req.destroy(timeoutError);
-    });
-
-    req.on('error', (err) => {
-      cleanup();
-      reject(err);
-    });
-
-    if (signal?.aborted) {
-      onAbort();
-      return;
-    }
-
-    signal?.addEventListener('abort', onAbort, { once: true });
-    req.write(requestBody);
-    req.end();
-  });
-}
-
 function getConfiguredLlmEndpoint() {
   return optionalEnv('GEMINI_API_ENDPOINT') || optionalEnv('LLM_API_ENDPOINT') || optionalEnv('OPENAI_API_ENDPOINT');
 }
@@ -1639,29 +1546,6 @@ function getLlmApiFormat() {
   }
 
   return getConfiguredLlmBaseUrl() || getConfiguredLlmEndpoint() ? 'openai' : 'google';
-}
-
-function safeEndpointLabel(url) {
-  try {
-    const parsedUrl = new URL(url);
-    return `${parsedUrl.origin}${parsedUrl.pathname}`;
-  } catch {
-    return '(invalid endpoint URL)';
-  }
-}
-
-let hasLoggedLlmRouting = false;
-
-function logLlmRouting({ format, model }) {
-  if (hasLoggedLlmRouting) return;
-
-  if (format === 'openai') {
-    console.log(`LLM routing: OpenAI-compatible chat completions endpoint=${safeEndpointLabel(buildOpenAiCompatibleEndpoint())}, model=${model}`);
-  } else {
-    console.log(`LLM routing: Google Generative Language API endpoint=https://generativelanguage.googleapis.com/v1beta, model=${model}`);
-  }
-
-  hasLoggedLlmRouting = true;
 }
 
 function buildOpenAiCompatibleEndpoint() {
@@ -1732,15 +1616,15 @@ async function requestGeminiReportGoogle({ apiKey, model, prompt, signal }) {
   const thinkingLevel = process.env.GEMINI_THINKING_LEVEL;
   const thinkingConfig = thinkingLevel ? { thinkingConfig: { thinkingLevel: thinkingLevel.toUpperCase() } } : {};
 
-  const response = await requestJson(url, {
+  const response = await fetch(url, {
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: {
+    body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig,
       ...thinkingConfig,
-    },
+    }),
     signal,
-    timeoutMs: getLlmSocketTimeoutMs(),
   });
 
   if (!response.ok) await throwLlmRequestError(response, 'Gemini');
@@ -1769,19 +1653,19 @@ async function requestGeminiReportOpenAiCompatible({ apiKey, model, prompt, sign
   const maxTokens = Number(process.env.GEMINI_MAX_OUTPUT_TOKENS || process.env.LLM_MAX_OUTPUT_TOKENS || 65536);
   const temperature = Number(process.env.GEMINI_TEMPERATURE || process.env.LLM_TEMPERATURE || 1.0);
 
-  const response = await requestJson(endpoint, {
+  const response = await fetch(endpoint, {
+    method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,
     },
-    body: {
+    body: JSON.stringify({
       model,
       messages: [{ role: 'user', content: prompt }],
       temperature,
       max_tokens: maxTokens,
-    },
+    }),
     signal,
-    timeoutMs: getLlmSocketTimeoutMs(),
   });
 
   if (!response.ok) await throwLlmRequestError(response, 'OpenAI-compatible LLM');
@@ -1793,12 +1677,10 @@ async function requestGeminiReportOpenAiCompatible({ apiKey, model, prompt, sign
 
 async function requestGeminiReportOnce({ apiKey, model, prompt }) {
   const controller = new AbortController();
-  const requestTimeoutMs = getLlmRequestTimeoutMs();
-  const timeout = setTimeout(() => controller.abort(), requestTimeoutMs); // large model output can need more time
+  const timeout = setTimeout(() => controller.abort(), 5 * 60 * 1000); // 5 minutes (large model output can need more time)
 
   try {
     const format = getLlmApiFormat();
-    logLlmRouting({ format, model });
     if (format === 'openai') return await requestGeminiReportOpenAiCompatible({ apiKey, model, prompt, signal: controller.signal });
     return await requestGeminiReportGoogle({ apiKey, model, prompt, signal: controller.signal });
   } finally {
