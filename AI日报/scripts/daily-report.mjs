@@ -1,11 +1,12 @@
 import fs from 'node:fs/promises';
+import http from 'node:http';
+import https from 'node:https';
 import path from 'node:path';
 import nodemailer from 'nodemailer';
 
 const requiredEnv = [
   'APIFY_TOKEN',
   'APIFY_ACTOR_ID',
-  'GEMINI_API_KEY',
   'GEMINI_MODEL',
   'SMTP_HOST',
   'SMTP_PORT',
@@ -26,15 +27,20 @@ function optionalEnv(name) {
   return value && value.trim() ? value.trim() : undefined;
 }
 
+function describeError(err) {
+  const parts = [err?.message, err?.code, err?.cause?.message, err?.cause?.code].filter(Boolean);
+  return [...new Set(parts)].join(' | ') || String(err);
+}
+
 async function withRetry(fn, { retries = 3, baseDelayMs = 2000, label = 'operation' } = {}) {
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
       return await fn();
     } catch (err) {
-      const isRetryable = /ECONNRESET|ETIMEDOUT|ENOTFOUND|UND_ERR|fetch failed|AbortError|50[0-3]|429/i.test(err?.message || '');
+      const isRetryable = /ECONNRESET|ETIMEDOUT|ENOTFOUND|UND_ERR|fetch failed|AbortError|LLM_SOCKET_TIMEOUT|50[0-3]|429/i.test(describeError(err));
       if (attempt >= retries || !isRetryable) throw err;
       const delay = baseDelayMs * (2 ** attempt);
-      console.warn(`${label} attempt ${attempt + 1} failed: ${err.message}. Retrying in ${delay}ms...`);
+      console.warn(`${label} attempt ${attempt + 1} failed: ${describeError(err)}. Retrying in ${delay}ms...`);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
@@ -55,6 +61,76 @@ function normalizeApifyToken(raw) {
     const match = value.match(/token=([^&\s]+)/);
     return match?.[1] ? decodeURIComponent(match[1]) : value;
   }
+}
+
+function stripWrappingQuotes(value) {
+  const trimmed = value.trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
+function normalizeGeminiApiKey(raw) {
+  let value = stripWrappingQuotes(raw);
+
+  const assignmentMatch = value.match(/^(?:GEMINI_API_KEY|GOOGLE_API_KEY|GOOGLE_GEMINI_API_KEY|LLM_API_KEY|OPENAI_API_KEY)\s*=\s*(.+)$/i);
+  if (assignmentMatch?.[1]) value = stripWrappingQuotes(assignmentMatch[1]);
+
+  if (/^Bearer\s+/i.test(value)) value = value.replace(/^Bearer\s+/i, '').trim();
+
+  if (value.includes('key=')) {
+    try {
+      const parsedUrl = new URL(value);
+      value = parsedUrl.searchParams.get('key') || value;
+    } catch {
+      const match = value.match(/[?&]key=([^&\s]+)/);
+      if (match?.[1]) value = decodeURIComponent(match[1]);
+    }
+  }
+
+  return stripWrappingQuotes(value);
+}
+
+function isPlaceholderSecret(value) {
+  return /^(\*+|x+|<.+>|\{\{.+\}\}|your[_ -]?api[_ -]?key|replace[_ -]?me)$/i.test(value.trim());
+}
+
+function isValidGeminiApiKey(value) {
+  return Boolean(value) && !isPlaceholderSecret(value) && !/\s/.test(value);
+}
+
+let cachedGeminiApiKey;
+
+function requireGeminiApiKey() {
+  if (cachedGeminiApiKey) return cachedGeminiApiKey;
+
+  const candidates = ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GEMINI_API_KEY', 'LLM_API_KEY', 'OPENAI_API_KEY'];
+  const configured = candidates
+    .map((name) => ({ name, raw: process.env[name] }))
+    .filter(({ raw }) => raw && raw.trim())
+    .map(({ name, raw }) => ({ name, apiKey: normalizeGeminiApiKey(raw) }));
+
+  if (configured.length === 0) {
+    throw new Error(`Missing required environment variable: GEMINI_API_KEY (or fallback ${candidates.slice(1).join('/')})`);
+  }
+
+  const valid = configured.find(({ apiKey }) => isValidGeminiApiKey(apiKey));
+  if (!valid) {
+    const names = configured.map(({ name }) => name).join(', ');
+    throw new Error(
+      `Invalid LLM API key configured in ${names}. Store only the raw API key value in GitHub Secrets, without quotes, labels, JSON, or a full request URL.`,
+    );
+  }
+
+  const skipped = configured.filter(({ name, apiKey }) => name !== valid.name && !isValidGeminiApiKey(apiKey));
+  if (skipped.length > 0) {
+    console.warn(`Ignoring invalid LLM API key secret(s): ${skipped.map(({ name }) => name).join(', ')}`);
+  }
+
+  console.log(`Using LLM API key from ${valid.name} (${maskSecret(valid.apiKey)})`);
+  cachedGeminiApiKey = valid.apiKey;
+  return cachedGeminiApiKey;
 }
 
 function parseBooleanEnv(value, fallback = false) {
@@ -1453,10 +1529,196 @@ function getPromptTemplate() {
 `;
 }
 
-async function requestGeminiReportOnce({ apiKey, model, prompt }) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5 * 60 * 1000); // 5 minutes (Gemini 3 thinking + large output needs more time)
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+function parsePositiveIntegerEnv(names, fallback) {
+  for (const name of names) {
+    const value = optionalEnv(name);
+    if (!value) continue;
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    console.warn(`Ignoring invalid positive integer env ${name}=${value}; using fallback ${fallback}.`);
+  }
+  return fallback;
+}
+
+function getLlmSocketTimeoutMs() {
+  return parsePositiveIntegerEnv(['LLM_SOCKET_TIMEOUT_MS', 'GEMINI_SOCKET_TIMEOUT_MS', 'LLM_CONNECT_TIMEOUT_MS', 'GEMINI_CONNECT_TIMEOUT_MS'], 60_000);
+}
+
+function getLlmRequestTimeoutMs() {
+  return parsePositiveIntegerEnv(['LLM_REQUEST_TIMEOUT_MS', 'GEMINI_REQUEST_TIMEOUT_MS'], 5 * 60 * 1000);
+}
+
+function createTextResponse({ statusCode, headers, bodyText }) {
+  return {
+    ok: statusCode >= 200 && statusCode < 300,
+    status: statusCode,
+    headers,
+    text: async () => bodyText,
+    json: async () => JSON.parse(bodyText),
+  };
+}
+
+function requestJson(url, { headers, body, signal, timeoutMs = 60_000 }) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(url);
+    const transport = parsedUrl.protocol === 'http:' ? http : https;
+    const requestBody = JSON.stringify(body);
+
+    const req = transport.request(
+      parsedUrl,
+      {
+        method: 'POST',
+        headers: {
+          ...headers,
+          'Content-Length': Buffer.byteLength(requestBody),
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          cleanup();
+          resolve(createTextResponse({
+            statusCode: res.statusCode || 0,
+            headers: res.headers,
+            bodyText: Buffer.concat(chunks).toString('utf8'),
+          }));
+        });
+      },
+    );
+
+    const cleanup = () => {
+      signal?.removeEventListener('abort', onAbort);
+    };
+
+    const onAbort = () => {
+      const abortError = new Error(`LLM request aborted after ${getLlmRequestTimeoutMs()}ms overall timeout: ${parsedUrl.origin}`);
+      abortError.code = 'LLM_REQUEST_ABORTED';
+      req.destroy(abortError);
+    };
+
+    req.setTimeout(timeoutMs, () => {
+      const timeoutError = new Error(
+        `LLM socket timed out after ${timeoutMs}ms while connecting/reading: ${parsedUrl.origin}. ` +
+          'If this is a company model platform, confirm the base URL is reachable from GitHub Actions or increase LLM_SOCKET_TIMEOUT_MS.',
+      );
+      timeoutError.code = 'LLM_SOCKET_TIMEOUT';
+      req.destroy(timeoutError);
+    });
+
+    req.on('error', (err) => {
+      cleanup();
+      reject(err);
+    });
+
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+    req.write(requestBody);
+    req.end();
+  });
+}
+
+function getConfiguredLlmEndpoint() {
+  return optionalEnv('GEMINI_API_ENDPOINT') || optionalEnv('LLM_API_ENDPOINT') || optionalEnv('OPENAI_API_ENDPOINT');
+}
+
+function getConfiguredLlmBaseUrl() {
+  return optionalEnv('GEMINI_API_BASE_URL') || optionalEnv('LLM_API_BASE_URL') || optionalEnv('OPENAI_BASE_URL') || optionalEnv('OPENAI_API_BASE_URL');
+}
+
+function getLlmApiFormat() {
+  const format = optionalEnv('GEMINI_API_FORMAT') || optionalEnv('LLM_API_FORMAT');
+  if (format) {
+    const normalized = format.toLowerCase();
+    if (['google', 'openai'].includes(normalized)) return normalized;
+    throw new Error(`Unsupported GEMINI_API_FORMAT/LLM_API_FORMAT: ${format}. Use "google" or "openai".`);
+  }
+
+  return getConfiguredLlmBaseUrl() || getConfiguredLlmEndpoint() ? 'openai' : 'google';
+}
+
+function safeEndpointLabel(url) {
+  try {
+    const parsedUrl = new URL(url);
+    return `${parsedUrl.origin}${parsedUrl.pathname}`;
+  } catch {
+    return '(invalid endpoint URL)';
+  }
+}
+
+let hasLoggedLlmRouting = false;
+
+function logLlmRouting({ format, model }) {
+  if (hasLoggedLlmRouting) return;
+
+  if (format === 'openai') {
+    console.log(`LLM routing: OpenAI-compatible chat completions endpoint=${safeEndpointLabel(buildOpenAiCompatibleEndpoint())}, model=${model}`);
+  } else {
+    console.log(`LLM routing: Google Generative Language API endpoint=https://generativelanguage.googleapis.com/v1beta, model=${model}`);
+  }
+
+  hasLoggedLlmRouting = true;
+}
+
+function buildOpenAiCompatibleEndpoint() {
+  const endpoint = getConfiguredLlmEndpoint();
+  if (endpoint) return endpoint;
+
+  const baseUrl = getConfiguredLlmBaseUrl();
+  if (!baseUrl) throw new Error('Missing GEMINI_API_BASE_URL/LLM_API_BASE_URL/OPENAI_BASE_URL for OpenAI-compatible LLM API format.');
+
+  const trimmed = baseUrl.replace(/\/+$/, '');
+  if (trimmed.endsWith('/chat/completions')) return trimmed;
+  if (trimmed.endsWith('/v1')) return `${trimmed}/chat/completions`;
+  return `${trimmed}/v1/chat/completions`;
+}
+
+function parseResponseTextPart(part) {
+  if (!part) return '';
+  if (typeof part === 'string') return part;
+  if (typeof part?.text === 'string') return part.text;
+  return '';
+}
+
+function extractOpenAiCompatibleText(json) {
+  return (json?.choices || [])
+    .flatMap((choice) => {
+      const content = choice?.message?.content;
+      if (Array.isArray(content)) return content.map(parseResponseTextPart);
+      return [content, choice?.text];
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+async function throwLlmRequestError(response, providerLabel) {
+  const errorBody = await response.text();
+  let parsedError;
+  try {
+    parsedError = JSON.parse(errorBody)?.error;
+  } catch {
+    parsedError = undefined;
+  }
+
+  const reason = parsedError?.details?.find((detail) => detail?.reason)?.reason;
+  const message = parsedError?.message || errorBody;
+  if (reason === 'API_KEY_INVALID' || message.toLowerCase().includes('api key not valid')) {
+    throw new Error(
+      `${providerLabel} request failed: the configured API key was rejected. ` +
+        'If you use a company model platform, set GEMINI_API_BASE_URL/OPENAI_BASE_URL (or GEMINI_API_ENDPOINT) to that platform\'s OpenAI-compatible endpoint.',
+    );
+  }
+
+  throw new Error(`${providerLabel} request failed: ${response.status} ${message}`);
+}
+
+async function requestGeminiReportGoogle({ apiKey, model, prompt, signal }) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   // Gemini 3.x recommends temperature=1.0; lower values (e.g. 0.2) may cause
   // looping or degraded output. Keep 1.0 as default for gemini-3 compatibility.
@@ -1470,23 +1732,18 @@ async function requestGeminiReportOnce({ apiKey, model, prompt }) {
   const thinkingLevel = process.env.GEMINI_THINKING_LEVEL;
   const thinkingConfig = thinkingLevel ? { thinkingConfig: { thinkingLevel: thinkingLevel.toUpperCase() } } : {};
 
-  let response;
-  try {
-    response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig,
-        ...thinkingConfig,
-      }),
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
+  const response = await requestJson(url, {
+    headers: { 'Content-Type': 'application/json' },
+    body: {
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig,
+      ...thinkingConfig,
+    },
+    signal,
+    timeoutMs: getLlmSocketTimeoutMs(),
+  });
 
-  if (!response.ok) throw new Error(`Gemini request failed: ${response.status} ${await response.text()}`);
+  if (!response.ok) await throwLlmRequestError(response, 'Gemini');
   const json = await response.json();
 
   // Check if output was truncated due to token limit
@@ -1499,12 +1756,54 @@ async function requestGeminiReportOnce({ apiKey, model, prompt }) {
 
   // Extract text parts, skipping thinking parts (Gemini 3 returns thought: true on internal reasoning)
   const text = (json?.candidates || [])
-    .flatMap((c) => (c?.content?.parts || []).filter((p) => !p?.thought).map((p) => p?.text).filter(Boolean))
+    .flatMap((c) => (c?.content?.parts || []).filter((part) => !part?.thought).map((part) => part?.text).filter(Boolean))
     .join('\n')
     .trim();
 
   if (!text) throw new Error('Gemini returned empty textual output.');
   return text;
+}
+
+async function requestGeminiReportOpenAiCompatible({ apiKey, model, prompt, signal }) {
+  const endpoint = buildOpenAiCompatibleEndpoint();
+  const maxTokens = Number(process.env.GEMINI_MAX_OUTPUT_TOKENS || process.env.LLM_MAX_OUTPUT_TOKENS || 65536);
+  const temperature = Number(process.env.GEMINI_TEMPERATURE || process.env.LLM_TEMPERATURE || 1.0);
+
+  const response = await requestJson(endpoint, {
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: {
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      temperature,
+      max_tokens: maxTokens,
+    },
+    signal,
+    timeoutMs: getLlmSocketTimeoutMs(),
+  });
+
+  if (!response.ok) await throwLlmRequestError(response, 'OpenAI-compatible LLM');
+  const json = await response.json();
+  const text = extractOpenAiCompatibleText(json);
+  if (!text) throw new Error('OpenAI-compatible LLM returned empty textual output.');
+  return text;
+}
+
+async function requestGeminiReportOnce({ apiKey, model, prompt }) {
+  const controller = new AbortController();
+  const requestTimeoutMs = getLlmRequestTimeoutMs();
+  const timeout = setTimeout(() => controller.abort(), requestTimeoutMs); // large model output can need more time
+
+  try {
+    const format = getLlmApiFormat();
+    logLlmRouting({ format, model });
+    if (format === 'openai') return await requestGeminiReportOpenAiCompatible({ apiKey, model, prompt, signal: controller.signal });
+    return await requestGeminiReportGoogle({ apiKey, model, prompt, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function requestGeminiReport(params) {
@@ -1748,7 +2047,7 @@ async function generateReport(items, top20, stats, peopleStats) {
     return `# AI Pulse - X Daily Brief\n\n今日无可用AI相关内容。\n`;
   }
 
-  const apiKey = requireEnv('GEMINI_API_KEY');
+  const apiKey = requireGeminiApiKey();
   const model = requireEnv('GEMINI_MODEL');
   console.log(`Using GEMINI_MODEL=${model}`);
 
@@ -2278,6 +2577,7 @@ async function generateActionSheet(allDailyItems, top20) {
 
 async function main() {
   requiredEnv.forEach(requireEnv);
+  requireGeminiApiKey();
 
   const templateRaw = optionalEnv('APIFY_ACTOR_INPUT_JSON');
   const templateInput = templateRaw ? parseApifyInputTemplate(templateRaw) : {};
@@ -2372,7 +2672,7 @@ async function main() {
   await fs.writeFile('artifacts/daily-report.md', report, 'utf8');
 
   // Cross-validate with Chinese AI media and save iteration log
-  const apiKey = requireEnv('GEMINI_API_KEY');
+  const apiKey = requireGeminiApiKey();
   const model = requireEnv('GEMINI_MODEL');
   const crossValidation = await crossValidateWithMedia({ apiKey, model, reportMarkdown: report });
   if (crossValidation) {

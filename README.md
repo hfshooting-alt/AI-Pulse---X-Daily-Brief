@@ -111,6 +111,20 @@ compositeScore = outputCount + interactionScore × 2
 
 在 GitHub Actions 页面手动触发 `workflow_dispatch`。
 
+## LLM API 调用逻辑
+
+脚本只有两种调用模式：
+
+1. **Google 原生 Gemini 模式（默认）**：没有配置任何 Base URL / Endpoint 时，使用 `GEMINI_API_KEY` 调用 `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`。
+2. **OpenAI-compatible 公司平台模式**：只要配置了 `GEMINI_API_BASE_URL`、`LLM_API_BASE_URL` 或 `OPENAI_BASE_URL`（或对应的完整 `*_ENDPOINT`），就自动改用 `Authorization: Bearer <API Key>` 调用 `/chat/completions`。公司平台提示“替换模型基址”时，通常就是用这个模式。
+
+最简配置建议：
+
+- 直连 Google：只配 `GEMINI_API_KEY` + `GEMINI_MODEL`。
+- 公司平台：配 `OPENAI_API_KEY`（或 `GEMINI_API_KEY`）+ `OPENAI_BASE_URL`（平台给的模型基址）+ `GEMINI_MODEL`（平台给的模型名）。
+
+脚本运行时会打印一行 `LLM routing: ...`，用于确认实际走的是 Google 还是公司平台 endpoint。
+
 ## 环境变量
 
 | 变量 | 必填 | 说明 |
@@ -119,10 +133,15 @@ compositeScore = outputCount + interactionScore × 2
 | `APIFY_ACTOR_ID` | 是 | Apify Actor 标识 |
 | `APIFY_ACTOR_INPUT_JSON` | 否 | Actor 输入覆盖（含 searchTerms 时自动改写日期窗口） |
 | `APIFY_PEOPLE_JSON` | 否 | 人物库 JSON |
-| `GEMINI_API_KEY` | 是 | Gemini API Key |
-| `GEMINI_MODEL` | 是 | Gemini 模型名 |
+| `GEMINI_API_KEY` | 是 | LLM API Key（Google AI Studio 可直接填原始 Gemini key；公司中转/聚合平台也可填平台 key；也可用 `GOOGLE_API_KEY` / `GOOGLE_GEMINI_API_KEY` / `LLM_API_KEY` / `OPENAI_API_KEY` 作为备用 Secret） |
+| `GEMINI_MODEL` | 是 | 模型名（Google 原生格式如 `gemini-...`；公司平台按平台给出的 Gemini/Claude 模型名填写） |
+| `GEMINI_API_FORMAT` / `LLM_API_FORMAT` | 否 | API 协议：`google`（默认，直连 Google Generative Language API）或 `openai`（公司中转/聚合平台常见的 OpenAI-compatible `/chat/completions` 协议） |
+| `GEMINI_API_BASE_URL` / `LLM_API_BASE_URL` / `OPENAI_BASE_URL` | 否 | 公司平台给出的模型基址/Base URL；只要设置该项就会自动走 `openai` 协议，会自动拼接 `/v1/chat/completions` 或 `/chat/completions` |
+| `GEMINI_API_ENDPOINT` / `LLM_API_ENDPOINT` / `OPENAI_API_ENDPOINT` | 否 | 公司平台完整 Chat Completions Endpoint；优先级高于 Base URL |
 | `GEMINI_MAX_OUTPUT_TOKENS` | 否 | 最大输出 token（默认 65536） |
 | `GEMINI_TEMPERATURE` | 否 | 温度参数（默认 1.0） |
+| `LLM_SOCKET_TIMEOUT_MS` / `GEMINI_SOCKET_TIMEOUT_MS` | 否 | LLM 单次 socket 连接/读取超时（默认 60000ms；公司平台从 GitHub Actions 访问较慢时可调大） |
+| `LLM_REQUEST_TIMEOUT_MS` / `GEMINI_REQUEST_TIMEOUT_MS` | 否 | LLM 单次请求整体超时（默认 300000ms） |
 | `GEMINI_THINKING_LEVEL` | 否 | 思考深度 minimal / low / medium / high |
 | `GEMINI_RETRY_WEAK_STRUCTURE` | 否 | 当日报结构过弱（TOP3/中热度/链接不足）时是否自动重试一次 Gemini（默认 true） |
 | `SMTP_HOST` | 是 | SMTP 服务器 |

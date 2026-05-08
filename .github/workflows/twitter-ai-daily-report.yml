@@ -44,8 +44,23 @@ jobs:
           APIFY_PEOPLE_JSON: ${{ secrets.APIFY_PEOPLE_JSON }}
 
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GOOGLE_GEMINI_API_KEY: ${{ secrets.GOOGLE_GEMINI_API_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          GEMINI_API_FORMAT: ${{ secrets.GEMINI_API_FORMAT }}
+          GEMINI_API_BASE_URL: ${{ secrets.GEMINI_API_BASE_URL }}
+          GEMINI_API_ENDPOINT: ${{ secrets.GEMINI_API_ENDPOINT }}
+          LLM_API_FORMAT: ${{ secrets.LLM_API_FORMAT }}
+          LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_API_BASE_URL: ${{ secrets.OPENAI_API_BASE_URL }}
+          LLM_API_ENDPOINT: ${{ secrets.LLM_API_ENDPOINT }}
+          OPENAI_API_ENDPOINT: ${{ secrets.OPENAI_API_ENDPOINT }}
           GEMINI_TEMPERATURE: ${{ secrets.GEMINI_TEMPERATURE }}
+          LLM_SOCKET_TIMEOUT_MS: ${{ secrets.LLM_SOCKET_TIMEOUT_MS }}
+          LLM_REQUEST_TIMEOUT_MS: ${{ secrets.LLM_REQUEST_TIMEOUT_MS }}
           REPORT_PROMPT_TEMPLATE: ${{ secrets.REPORT_PROMPT_TEMPLATE }}
 
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
