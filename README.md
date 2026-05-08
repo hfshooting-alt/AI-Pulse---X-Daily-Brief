@@ -119,8 +119,11 @@ compositeScore = outputCount + interactionScore × 2
 | `APIFY_ACTOR_ID` | 是 | Apify Actor 标识 |
 | `APIFY_ACTOR_INPUT_JSON` | 否 | Actor 输入覆盖（含 searchTerms 时自动改写日期窗口） |
 | `APIFY_PEOPLE_JSON` | 否 | 人物库 JSON |
-| `GEMINI_API_KEY` | 是 | Gemini API Key |
-| `GEMINI_MODEL` | 是 | Gemini 模型名 |
+| `GEMINI_API_KEY` | 是 | LLM API Key（Google AI Studio 可直接填原始 Gemini key；公司中转/聚合平台也可填平台 key；也可用 `GOOGLE_API_KEY` / `GOOGLE_GEMINI_API_KEY` / `LLM_API_KEY` / `OPENAI_API_KEY` 作为备用 Secret） |
+| `GEMINI_MODEL` | 是 | 模型名（Google 原生格式如 `gemini-...`；公司平台按平台给出的 Gemini/Claude 模型名填写） |
+| `GEMINI_API_FORMAT` / `LLM_API_FORMAT` | 否 | API 协议：`google`（默认，直连 Google Generative Language API）或 `openai`（公司中转/聚合平台常见的 OpenAI-compatible `/chat/completions` 协议） |
+| `GEMINI_API_BASE_URL` / `LLM_API_BASE_URL` / `OPENAI_BASE_URL` | 否 | 公司平台给出的模型基址/Base URL；只要设置该项就会自动走 `openai` 协议，会自动拼接 `/v1/chat/completions` 或 `/chat/completions` |
+| `GEMINI_API_ENDPOINT` / `LLM_API_ENDPOINT` / `OPENAI_API_ENDPOINT` | 否 | 公司平台完整 Chat Completions Endpoint；优先级高于 Base URL |
 | `GEMINI_MAX_OUTPUT_TOKENS` | 否 | 最大输出 token（默认 65536） |
 | `GEMINI_TEMPERATURE` | 否 | 温度参数（默认 1.0） |
 | `GEMINI_THINKING_LEVEL` | 否 | 思考深度 minimal / low / medium / high |
