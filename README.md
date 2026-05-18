@@ -1,173 +1,154 @@
 # AI Pulse - X Daily Brief
 
-AI 行业日报自动生成 Agent。从 Twitter/X 采集 AI 领域 KOL 动态，经 Gemini 聚类分析后生成结构化日报，通过邮件发送。
+一个保留核心分析产物的 AI 日报 Agent：
 
-## 整体架构
-
-```
-109 位人物库
-    │
-    ▼
-┌─────────────────────────────────┐
-│  Step 1  Apify 采集近 7 天全量数据  │
-└────────────┬────────────────────┘
-             ▼
-┌─────────────────────────────────┐
-│  Step 2  综合评分，选出 TOP20     │
-│  outputCount + 互动关系权重       │
-│  （回复/引用/提及 五维度加权）      │
-└────────────┬────────────────────┘
-             ▼
-┌─────────────────────────────────┐
-│  Step 3  抓取 TOP20 近 24h 动态   │
-│  → 全量 Action Sheet (按topic聚类)│
-│  → AI 相关内容过滤                │
-└────────────┬────────────────────┘
-             ▼
-┌─────────────────────────────────┐
-│  Step 4  Gemini 生成日报          │
-│  独立聚类 → TOP3 热点 + 中热度事件 │
-│  + Today's Summary (面向高管)     │
-│  + prompt-rules.md 累积规则注入   │
-└────────────┬────────────────────┘
-             ▼
-┌─────────────────────────────────┐
-│  Step 5  交叉验证                 │
-│  从量子位/机器之心/新智元视角       │
-│  审视覆盖盲区与权重偏差            │
-│  → iteration-log.md              │
-└────────────┬────────────────────┘
-             ▼
-┌─────────────────────────────────┐
-│  Step 6  SMTP 邮件发送            │
-│  Markdown → HTML 渲染             │
-└─────────────────────────────────┘
+```text
+Twitter/X API 抓取指定账号近一周动态
+        ↓
+按发帖量 + 五维度同行互动分生成 TOP20 活跃人物
+        ↓
+Twitter/X API 抓取 TOP20 近 24h 动态
+        ↓
+Gemini 原生 API 生成中文 Markdown 日报
+        ↓
+保存/复用历史抓取缓存，输出 artifacts，并通过 SMTP 邮件发送
 ```
 
-## TOP20 评分机制
+当前版本只删除 **Apify 抓取链路** 和 **OpenAI-compatible / 多 Base URL / 多 Key fallback 等复杂兜底嵌套**。TOP20 活跃人物排名、互动关系五维度加权、TOP20 Action Sheet 这类有实际输出价值的逻辑已保留。
 
-排名不只看发帖数量，而是综合活跃度和圈内互动：
+## 保留的核心能力
 
-```
-compositeScore = outputCount + interactionScore × 2
-```
-
-互动分由五个维度加权：
-
-| 互动类型 | 含义 | 权重 |
-|----------|------|------|
-| 被引用转发 | 观点被同行引用讨论 | 1.5x |
-| 主动引用 | 引用他人观点参与讨论 | 1.2x |
-| 回复 | 直接回复他人推文 | 1.0x |
-| 被提及 | 被他人 @点名 | 0.8x |
-| 主动提及 | @提及他人 | 0.5x |
-
-## 日报结构
-
-| 板块 | 内容 |
-|------|------|
-| **TOP3 热度事件** | 参与人数最多的 3 个具体事件，含热点解析 + 相关动态（附来源链接） |
-| **中热度话题** | 7-12 条事件，按 Topic 分组，覆盖更广的行业动态 |
-| **TOP20 活跃人物** | 真名、账号、职位、今日 action 数量、涉及热点数、同行互动数 |
-| **Today's Summary** | 面向高管的 200 字结构化摘要：关键结论 / 重要原因 / 业务影响 |
+- **抓取方式**：只使用 Twitter/X API v2 `recent search`，不再使用 Apify。
+- **LLM**：只调用 Google Gemini 原生 `generateContent` API。
+- **历史缓存**：默认读写 `AI日报/artifacts/twitter-history.json`，GitHub Actions 会用 cache 跨运行保存，避免每次为了 TOP20 重爬整周数据。
+- **TOP20 排名**：基于近一周动态数与同行互动分计算。
+- **互动关系五维度加权**：
+  - 被引用转发：`1.5x`
+  - 主动引用：`1.2x`
+  - 回复：`1.0x`
+  - 被提及：`0.8x`
+  - 主动提及：`0.5x`
+- **日报发送**：用 SMTP 将 Markdown 日报转成 HTML 邮件发送。
+- **提示词补充**：如果存在 `AI日报/prompt-rules.md`，会自动拼进 Gemini 提示词。
 
 ## 输出产物
 
-每次运行生成以下文件（均在 `AI日报/artifacts/` 下）：
+每次运行会写入 `AI日报/artifacts/`：
 
 | 文件 | 说明 |
-|------|------|
-| `daily-report.md` | 日报正文（同时作为邮件内容发送） |
-| `top20-action-sheet.md / .csv` | TOP20 人物全量 Action Sheet，按 topic 聚类，日报是其子集 |
-| `ai-weekly-output-counts.md / .csv` | 全员近 7 天动态数量排名（含互动分） |
-| `iteration-log.md` | 交叉验证历史记录，按日期累积 |
-| `media-cross-validation-sources.json` | 交叉验证抓取到的微信公众号文章（仅量子位/机器之心/新智元，近2天，优先 Twitter/X 相关新闻） |
-| `top20-ranking.json` | TOP20 排名原始数据 |
+|---|---|
+| `daily-report.md` | Gemini 生成的日报正文，文末追加 TOP20 活跃人物。 |
+| `tweets.json` / `tweets.csv` | TOP20 近 24h 动态，供排查日报来源。 |
+| `weekly-tweets.json` | 本次用于 TOP20 排名的近一周数据（历史缓存 + 本次增量）。 |
+| `twitter-history.json` | 跨运行复用的历史抓取缓存，默认保留 TOP20 所需窗口外加少量缓冲。 |
+| `ai-weekly-output-counts.md` / `.csv` | 全员近一周发帖量、互动分、同行互动数、综合分。 |
+| `top20-ranking.json` | TOP20 排名原始 JSON。 |
+| `top20-action-sheet.md` / `.csv` | TOP20 近 24h 全量 Action Sheet，按话题分组。 |
 
-## 自迭代机制
 
+## 历史缓存如何避免重复爬取
+
+之前只有 `weekly-tweets.json` 作为当次运行 artifact，GitHub Actions 下一次运行不会自动拿它继续用，所以确实会重复抓近一周数据。
+
+现在脚本会：
+
+1. 先读取 `twitter-history.json`。
+2. 从缓存里筛出近一周、且属于当前账号列表的动态。
+3. 只从「缓存中最新一条动态时间 - 5 分钟」开始增量调用 Twitter/X API。
+4. 合并缓存与新增动态，再生成 TOP20 排名、周榜和 Action Sheet。
+5. 写回 `twitter-history.json`；GitHub Actions 用 `actions/cache` 在下次运行前恢复这个文件。
+
+如果账号列表大幅变化，或者你怀疑缓存不完整，可以临时设置 `TWITTER_FORCE_FULL_FETCH=true` 强制重爬一次。
+
+## GitHub Secrets 配置
+
+### 必填
+
+| Secret | 说明 |
+|---|---|
+| `TWITTER_BEARER_TOKEN` | Twitter/X Developer Portal 里的 Bearer Token。 |
+| `TWITTER_HANDLES` | 要抓取的账号列表，支持逗号、空格或换行分隔，例如 `sama,karpathy,demishassabis`。 |
+| `GEMINI_API_KEY` | Google AI Studio / Gemini API Key。 |
+| `GEMINI_MODEL` | Gemini 模型名，例如 `gemini-2.5-flash`。 |
+| `SMTP_HOST` | SMTP 服务器地址。 |
+| `SMTP_PORT` | SMTP 端口，常见为 `465` 或 `587`。 |
+| `SMTP_USER` | SMTP 用户名。 |
+| `SMTP_PASS` | SMTP 密码或应用专用密码。 |
+| `MAIL_FROM` | 发件人地址。 |
+| `MAIL_TO` | 收件人地址，多个地址通常可用逗号分隔。 |
+
+### 可选
+
+| Secret | 默认值 | 说明 |
+|---|---:|---|
+| `TWITTER_PEOPLE_JSON` | 空 | 比 `TWITTER_HANDLES` 更丰富的账号配置。设置后优先使用它。示例：`[{"handle":"sama","name":"Sam Altman","title":"OpenAI CEO","description":"OpenAI CEO"}]`。 |
+| `REPORT_WEEKLY_LOOKBACK_HOURS` | `168` | TOP20 排名使用的回看窗口。X recent search 通常最多覆盖近 7 天，因此脚本会限制不超过 168 小时。 |
+| `REPORT_WEEKLY_MAX_TWEETS` | `1000` | 近一周最多抓取多少条动态，上限在脚本里限制为 3000。 |
+| `REPORT_LOOKBACK_HOURS` | `24` | TOP20 日报动态抓取窗口。 |
+| `REPORT_MAX_TWEETS` | `120` | 最多交给 Gemini 的 TOP20 日动态数，上限在脚本里限制为 500。 |
+| `TWITTER_HISTORY_PATH` | `artifacts/twitter-history.json` | 历史缓存路径；一般不用改。 |
+| `TWITTER_FORCE_FULL_FETCH` | `false` | 设为 `true` 时忽略缓存，强制重爬近一周窗口。 |
+| `GEMINI_TEMPERATURE` | `0.3` | Gemini 生成温度。 |
+| `SMTP_SECURE` | `true` | 是否使用 TLS；如果端口是 587，可按邮件服务商要求设为 `false`。 |
+| `MAIL_SUBJECT` | `AI 日报 YYYY-MM-DD` | 邮件标题。 |
+
+## 本地测试
+
+进入项目目录：
+
+```bash
+cd AI日报
+npm ci
+node --check scripts/daily-report.mjs
 ```
-日报生成 → 交叉验证（量子位/机器之心/新智元视角）
-                ↓
-        iteration-log.md（自动保存）
-                ↓
-        用户审阅，挑选有价值的建议
-                ↓
-        手动写入 prompt-rules.md
-                ↓
-        下次生成日报时自动注入 Prompt ──→ 日报质量持续提升
+
+只验证脚本语法不需要任何 Secret。若要跑完整链路：
+
+```bash
+export TWITTER_BEARER_TOKEN="你的 Twitter/X Bearer Token"
+export TWITTER_HANDLES="sama,karpathy,demishassabis"
+export GEMINI_API_KEY="你的 Gemini API Key"
+export GEMINI_MODEL="gemini-2.5-flash"
+export SMTP_HOST="smtp.example.com"
+export SMTP_PORT="465"
+export SMTP_USER="name@example.com"
+export SMTP_PASS="your-password"
+export MAIL_FROM="name@example.com"
+export MAIL_TO="receiver@example.com"
+
+npm run run:daily-report
 ```
 
-`AI日报/prompt-rules.md` 是规则累积文件，格式自由，例如：
+如果只想在本地生成文件、不发邮件，可以额外设置：
 
-```markdown
-### 2026-03-27
-- TOP3 热点解析每条至少写 3 句话
-- 不要把同一产品的不同功能更新拆成多个事件
-- 注意覆盖 AI 安全/治理类话题
+```bash
+export SKIP_EMAIL=true
+npm run run:daily-report
 ```
 
-## 使用方式
+运行成功后检查：
 
-在 GitHub Actions 页面手动触发 `workflow_dispatch`。
-
-## LLM API 调用逻辑
-
-脚本只有两种调用模式：
-
-1. **Google 原生 Gemini 模式（默认）**：没有配置任何 Base URL / Endpoint 时，使用 `GEMINI_API_KEY` 调用 `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`。
-2. **OpenAI-compatible 公司平台模式**：只要配置了 `GEMINI_API_BASE_URL`、`LLM_API_BASE_URL` 或 `OPENAI_BASE_URL`（或对应的完整 `*_ENDPOINT`），就自动改用 `Authorization: Bearer <API Key>` 调用 `/chat/completions`。公司平台提示“替换模型基址”时，通常就是用这个模式。
-
-最简配置建议：
-
-- 直连 Google：只配 `GEMINI_API_KEY` + `GEMINI_MODEL`。
-- 公司平台：配 `OPENAI_API_KEY`（或 `GEMINI_API_KEY`）+ `OPENAI_BASE_URL`（平台给的模型基址）+ `GEMINI_MODEL`（平台给的模型名）。
-
-脚本运行时会打印一行 `LLM routing: ...`，用于确认实际走的是 Google 还是公司平台 endpoint。
-
-## 环境变量
-
-| 变量 | 必填 | 说明 |
-|------|------|------|
-| `APIFY_TOKEN` | 是 | Apify API Token |
-| `APIFY_ACTOR_ID` | 是 | Apify Actor 标识 |
-| `APIFY_ACTOR_INPUT_JSON` | 否 | Actor 输入覆盖（含 searchTerms 时自动改写日期窗口） |
-| `APIFY_PEOPLE_JSON` | 否 | 人物库 JSON |
-| `GEMINI_API_KEY` | 是 | LLM API Key（Google AI Studio 可直接填原始 Gemini key；公司中转/聚合平台也可填平台 key；也可用 `GOOGLE_API_KEY` / `GOOGLE_GEMINI_API_KEY` / `LLM_API_KEY` / `OPENAI_API_KEY` 作为备用 Secret） |
-| `GEMINI_MODEL` | 是 | 模型名（Google 原生格式如 `gemini-...`；公司平台按平台给出的 Gemini/Claude 模型名填写） |
-| `GEMINI_API_FORMAT` / `LLM_API_FORMAT` | 否 | API 协议：`google`（默认，直连 Google Generative Language API）或 `openai`（公司中转/聚合平台常见的 OpenAI-compatible `/chat/completions` 协议） |
-| `GEMINI_API_BASE_URL` / `LLM_API_BASE_URL` / `OPENAI_BASE_URL` | 否 | 公司平台给出的模型基址/Base URL；只要设置该项就会自动走 `openai` 协议，会自动拼接 `/v1/chat/completions` 或 `/chat/completions` |
-| `GEMINI_API_ENDPOINT` / `LLM_API_ENDPOINT` / `OPENAI_API_ENDPOINT` | 否 | 公司平台完整 Chat Completions Endpoint；优先级高于 Base URL |
-| `GEMINI_MAX_OUTPUT_TOKENS` | 否 | 最大输出 token（默认 65536） |
-| `GEMINI_TEMPERATURE` | 否 | 温度参数（默认 1.0） |
-| `LLM_SOCKET_TIMEOUT_MS` / `GEMINI_SOCKET_TIMEOUT_MS` | 否 | LLM 单次 socket 连接/读取超时（默认 60000ms；公司平台从 GitHub Actions 访问较慢时可调大） |
-| `LLM_REQUEST_TIMEOUT_MS` / `GEMINI_REQUEST_TIMEOUT_MS` | 否 | LLM 单次请求整体超时（默认 300000ms） |
-| `GEMINI_THINKING_LEVEL` | 否 | 思考深度 minimal / low / medium / high |
-| `GEMINI_RETRY_WEAK_STRUCTURE` | 否 | 当日报结构过弱（TOP3/中热度/链接不足）时是否自动重试一次 Gemini（默认 true） |
-| `SMTP_HOST` | 是 | SMTP 服务器 |
-| `SMTP_PORT` | 是 | SMTP 端口 |
-| `SMTP_USER` | 是 | SMTP 用户名 |
-| `SMTP_PASS` | 是 | SMTP 密码 |
-| `MAIL_FROM` | 是 | 发件人 |
-| `MAIL_TO` | 是 | 收件人 |
-| `MAIL_SUBJECT` | 否 | 邮件主题（默认：`[YYYY-MM-DD] AI Pulse - X Daily Brief`，日期为北京时间） |
-| `APIFY_REUSE_RECENT_RUNS` | 否 | 是否优先复用最近成功 run 的 dataset（默认 true） |
-| `APIFY_REUSE_RUNS_LIMIT` | 否 | 复用检查的最近 run 数量（默认 10，最大 50） |
-| `APIFY_REUSE_MAX_AGE_HOURS` | 否 | 仅复用最近 N 小时内的 run（默认 36 小时） |
-| `APIFY_SKIP_SECOND_FETCH_IF_SUFFICIENT` | 否 | 当 weekly 数据已足够覆盖 TOP20 的日窗口时，跳过第二次 Apify 抓取（默认 true） |
-| `APIFY_DAILY_MIN_ITEMS` | 否 | 判断 weekly 子集“足够”时的最小日动态数量阈值（默认 80） |
-| `APIFY_DAILY_MAX_MISSING_TOP20` | 否 | 判断 weekly 子集“足够”时允许缺失动态的 TOP20 人数上限（默认 8） |
-| `APIFY_DAILY_MIN_AI_ITEMS` | 否 | 跳过第二次抓取前，weekly 子集里最少 AI 相关动态数（默认 30） |
-| `APIFY_DAILY_MIN_AI_HANDLES` | 否 | 跳过第二次抓取前，weekly 子集里最少有 AI 动态的 TOP20 账号数（默认 8） |
-| `CROSS_VALIDATE_USE_JINA` | 否 | 交叉验证抓取失败时是否启用 `r.jina.ai` 回源兜底（默认 true） |
-
-## 项目结构
-
+```bash
+cat artifacts/daily-report.md
+cat artifacts/ai-weekly-output-counts.md
+cat artifacts/top20-action-sheet.md
 ```
-AI日报/
-├── scripts/
-│   └── daily-report.mjs    ← 核心脚本，包含全部 Agent 逻辑
-├── prompt-rules.md          ← 累积反馈规则（自动注入 Prompt）
-├── artifacts/               ← 运行产物（日报、Action Sheet、迭代日志等）
-└── package.json
+
+## GitHub Actions 使用
+
+在 GitHub Actions 页面手动触发 `Twitter AI Daily Report` workflow。当前 workflow 会安装依赖、检查脚本语法、恢复 `twitter-history.json` 缓存、运行日报脚本、保存新的历史缓存，并上传所有日报/TOP20 artifacts。
+
+## 已删除的复杂逻辑
+
+- 删除 Apify Token、Actor、Task、Actor Input Template、run reuse/cache 等采集路径。
+- 删除 OpenAI-compatible Base URL / Endpoint 路由、多个 API Key fallback、公司平台兼容分支。
+- 删除媒体交叉验证、`iteration-log`、微信公众号来源 JSON 等自迭代产物。
+- 删除大段硬编码人物画像兜底表；人物信息优先从 `TWITTER_PEOPLE_JSON` 读取。
+
+## 目录说明
+
+```text
+AI日报/scripts/daily-report.mjs   # 日报 Agent 主脚本
+AI日报/prompt-rules.md           # 可选的中文提示词补充规则
+.github/workflows/twitter-ai-daily-report.yml  # 手动触发的 GitHub Actions
 ```
