@@ -42,7 +42,7 @@ jobs:
       - name: Run daily report pipeline (Twitter/X API -> Gemini -> Email)
         run: npm run run:daily-report
         env:
-          TWITTER_BEARER_TOKEN: ${{ secrets.TWITTER_BEARER_TOKEN }}
+          TWITTERAPI_API_KEY: ${{ secrets.TWITTERAPI_API_KEY }}
           TWITTER_HANDLES: ${{ secrets.TWITTER_HANDLES }}
           TWITTER_PEOPLE_JSON: ${{ secrets.TWITTER_PEOPLE_JSON }}
           REPORT_WEEKLY_LOOKBACK_HOURS: ${{ secrets.REPORT_WEEKLY_LOOKBACK_HOURS }}
@@ -51,6 +51,9 @@ jobs:
           REPORT_MAX_TWEETS: ${{ secrets.REPORT_MAX_TWEETS }}
           TWITTER_HISTORY_PATH: ${{ secrets.TWITTER_HISTORY_PATH }}
           TWITTER_FORCE_FULL_FETCH: ${{ secrets.TWITTER_FORCE_FULL_FETCH }}
+          TWITTER_INCLUDE_REPLIES: ${{ secrets.TWITTER_INCLUDE_REPLIES }}
+          CROSS_VALIDATE_WITH_MEDIA: ${{ secrets.CROSS_VALIDATE_WITH_MEDIA }}
+          CROSS_VALIDATE_USE_JINA: ${{ secrets.CROSS_VALIDATE_USE_JINA }}
 
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
@@ -87,3 +90,5 @@ jobs:
             AI日报/artifacts/top20-ranking.json
             AI日报/artifacts/top20-action-sheet.md
             AI日报/artifacts/top20-action-sheet.csv
+            AI日报/artifacts/media-cross-validation-sources.json
+            AI日报/artifacts/iteration-log.md
