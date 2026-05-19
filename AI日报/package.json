@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint .",
     "clean": "next clean",
-    "run:daily-report": "node scripts/daily-report.mjs"
+    "run:daily-report": "python3 scripts/daily_report.py"
   },
   "dependencies": {
     "@google/genai": "^1.17.0",
