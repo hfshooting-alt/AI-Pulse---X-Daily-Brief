@@ -26,7 +26,7 @@ jobs:
         run: npm ci
 
       - name: Syntax check daily-report script
-        run: node --check scripts/daily-report.mjs
+        run: python3 -m py_compile scripts/daily_report.py
 
       - name: Prepare artifacts directory
         run: mkdir -p artifacts

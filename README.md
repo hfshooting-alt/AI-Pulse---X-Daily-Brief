@@ -119,7 +119,7 @@ curl --request GET \
 ```bash
 cd AI日报
 npm ci
-node --check scripts/daily-report.mjs
+python3 -m py_compile scripts/daily_report.py
 ```
 
 只验证脚本语法不需要任何 Secret。若要跑完整链路：
@@ -168,7 +168,7 @@ cat artifacts/top20-action-sheet.md
 ## 目录说明
 
 ```text
-AI日报/scripts/daily-report.mjs   # 日报 Agent 主脚本
+AI日报/scripts/daily_report.py   # 日报 Agent 主脚本
 AI日报/prompt-rules.md           # 可选的中文提示词补充规则
 .github/workflows/twitter-ai-daily-report.yml  # 手动触发的 GitHub Actions
 ```
